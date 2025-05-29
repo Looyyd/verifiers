@@ -1,15 +1,12 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import gymnasium as gym
-import numpy as np
 from datasets import Dataset
-from copy import deepcopy
-import threading
 
 from verifiers import RewardFunc
-from verifiers.envs.multiturn_env import MultiTurnEnv
+from verifiers.envs.multiturn_gym_env import MultiTurnGymEnv
 
 
-class FrozenLakeEnv(MultiTurnEnv):
+class FrozenLakeEnv(MultiTurnGymEnv):
     def __init__(
         self,
         dataset: Dataset | None = None,
@@ -27,13 +24,9 @@ The first digit in your message will be considered as your move.""",
         map_name: str = "4x4",
         **kwargs,
     ):
-
         # Store gym configuration
         self.is_slippery = is_slippery
         self.map_name = map_name
-
-        # Thread-local storage for accessing state in env_response
-        self._thread_local = threading.local()
 
         # Create initial dataset if none provided
         if dataset is None:
@@ -53,7 +46,7 @@ The first digit in your message will be considered as your move.""",
         for i in range(n_samples):
             data.append(
                 {
-                    "question": self.get_state_description(initial_state),
+                    "question": self.get_initial_state_description(),
                     "answer": "",  # No specific answer for FrozenLake
                     "task": "frozenlake",
                 }
@@ -61,34 +54,23 @@ The first digit in your message will be considered as your move.""",
 
         return Dataset.from_list(data)
 
-    def initialize_custom_state(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Initialize FrozenLake-specific state fields."""
-        # Create a new gym environment for this conversation
-        gym_env = gym.make(
+    def get_initial_state_description(self) -> str:
+        """Get description of initial state without creating a gym env."""
+        # For 4x4 FrozenLake, agent starts at position 0 (top-left)
+        return self.get_state_description(0)
+
+    def make_gym_env(self) -> gym.Env:
+        """Create a new FrozenLake gymnasium environment."""
+        return gym.make(
             "FrozenLake-v1",
             desc=None,
             map_name=self.map_name,
             is_slippery=self.is_slippery,
         )
-        state, _ = gym_env.reset()
-
-        return {
-            "gym_env": gym_env,
-            "gym_state": state,
-            "game_done": False,
-            "game_rewards": [],
-            "last_reward": 0.0,
-        }
 
     def get_grid_layout(self) -> List[List[str]]:
         """Extract grid layout from a fresh gymnasium environment."""
-        # Create a temporary environment just to get the grid layout
-        temp_env = gym.make(
-            "FrozenLake-v1",
-            desc=None,
-            map_name=self.map_name,
-            is_slippery=self.is_slippery,
-        )
+        temp_env = self.make_gym_env()
         # Access the underlying environment through the wrapper
         desc = temp_env.unwrapped.desc
 
@@ -108,8 +90,11 @@ The first digit in your message will be considered as your move.""",
         col = state % ncol
         return row, col
 
-    def get_state_description(self, state: int, agent_symbol: str = "A") -> str:
-        """Convert state to grid description - works for any grid size."""
+    def get_state_description(self, gym_state: Any) -> str:
+        """Convert gymnasium state to text description."""
+        # gym_state is an integer representing position in FrozenLake
+        state = int(gym_state)
+
         # Get the base grid layout
         grid = self.get_grid_layout()
 
@@ -118,35 +103,15 @@ The first digit in your message will be considered as your move.""",
 
         # Create display grid with agent position
         display_grid = [row[:] for row in grid]  # Deep copy
-        display_grid[row][col] = agent_symbol
+        display_grid[row][col] = "A"  # Agent symbol
 
         # Format as string
         grid_str = "Current grid state:\n"
         for grid_row in display_grid:
             grid_str += " ".join(grid_row) + "\n"
 
-        # Add legend (customize based on symbols found in grid)
-        symbols = set()
-        for row in grid:
-            symbols.update(row)
-        symbols.add(agent_symbol)
-
-        legend_map = {
-            "S": "Start",
-            "F": "Frozen",
-            "H": "Hole",
-            "G": "Goal",
-            agent_symbol: "Agent",
-        }
-
-        legend_parts = []
-        for symbol in sorted(symbols):
-            if symbol in legend_map:
-                legend_parts.append(f"{symbol}={legend_map[symbol]}")
-            else:
-                legend_parts.append(f"{symbol}=Unknown")
-
-        grid_str += f"\nLegend: {', '.join(legend_parts)}"
+        # Add legend
+        grid_str += "\nLegend: A=Agent, S=Start, F=Frozen, H=Hole, G=Goal"
         return grid_str
 
     def parse_action(self, message: str) -> int | None:
@@ -160,19 +125,48 @@ The first digit in your message will be considered as your move.""",
                 return int(char)
         return None
 
-    def step(self, states, llm, sampling_params):
-        """Override step to handle gym state updates properly."""
-        # Store states in thread-local storage for access in env_response
-        self._thread_local.states = states
+    def process_gym_step(
+        self, gym_env: gym.Env, action: Any
+    ) -> Tuple[Any, float, bool, bool, Dict]:
+        """Execute action in gym environment and return step results."""
+        return gym_env.step(action)
 
-        # Call parent step method
-        states = super().step(states, llm, sampling_params)
+    def _is_completion_message(self, content: str) -> bool:
+        """Check if a message indicates completion."""
+        return (
+            "Game over!" in content
+            or "Congratulations! You reached the goal!" in content
+        )
 
-        # Clean up thread-local storage
-        if hasattr(self._thread_local, "states"):
-            delattr(self._thread_local, "states")
+    def _invalid_action_response(self) -> Dict[str, str]:
+        """Response for invalid actions."""
+        return {
+            "role": "user",
+            "content": "Invalid move format. Game over! Please provide a valid digit (0-3) as your move.",
+        }
 
-        return states
+    def _generate_step_response(
+        self, state: Any, reward: float, done: bool, info: Dict
+    ) -> Dict[str, str]:
+        """Generate response after a step in the environment."""
+        if done:
+            if reward > 0:
+                return {
+                    "role": "user",
+                    "content": self.get_state_description(state)
+                    + "\n\nCongratulations! You reached the goal!",
+                }
+            else:
+                return {
+                    "role": "user",
+                    "content": self.get_state_description(state)
+                    + "\n\nGame over! You fell into a hole.",
+                }
+        else:
+            return {
+                "role": "user",
+                "content": self.get_state_description(state),
+            }
 
     def format_reward_func(
         self, completions: List[List[Dict[str, str]]], **kwargs: Any
