@@ -8,6 +8,7 @@ from .envs.doublecheck_env import DoubleCheckEnv
 from .envs.singleturn_env import SingleTurnEnv
 from .envs.simple_env import SimpleEnv
 from .envs.tool_env import ToolEnv
+from .envs.frozenlake_env import FrozenLakeEnv
 from .trainers.grpo_env_trainer import GRPOEnvTrainer
 from .utils.data_utils import extract_boxed_answer, extract_hash_answer, preprocess_dataset
 from .utils.model_utils import get_model, get_tokenizer, get_model_and_tokenizer
@@ -27,6 +28,7 @@ __all__ = [
     "SingleTurnEnv",
     "SimpleEnv",
     "ToolEnv",
+    "FrozenLakeEnv",
     "GRPOEnvTrainer",
     "get_model",
     "get_tokenizer",
