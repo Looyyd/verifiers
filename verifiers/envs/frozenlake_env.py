@@ -92,7 +92,8 @@ The first digit in your message will be considered as your move.""",
             map_name=self.map_name,
             is_slippery=self.is_slippery,
         )
-        desc = temp_env.desc
+        # Access the underlying environment through the wrapper
+        desc = temp_env.unwrapped.desc
 
         # Convert bytes to strings if necessary
         if isinstance(desc[0][0], bytes):
