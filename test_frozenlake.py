@@ -59,8 +59,15 @@ def test_frozenlake_env():
         ]
         custom_state = env.initialize_custom_state(test_messages)
         print(f"Custom state keys: {list(custom_state.keys())}")
-        print(f"Initial gym state: {custom_state['gym_state']}")
-        print(f"Game done: {custom_state['game_done']}")
+        print(f"State ID: {custom_state.get('_gym_state_id', 'Not found')}")
+
+        # Test that we can get the gym state (internal method)
+        try:
+            gym_state_info = env.get_gym_state(custom_state)
+            print(f"Gym state initialized: {gym_state_info['gym_state']}")
+            print(f"Game done: {gym_state_info['done']}")
+        except Exception as e:
+            print(f"Error accessing gym state: {e}")
         print()
 
         # Test environment response logic
