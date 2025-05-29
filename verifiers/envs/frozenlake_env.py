@@ -2,6 +2,8 @@ from typing import List, Dict, Any
 import gymnasium as gym
 import numpy as np
 from datasets import Dataset
+from copy import deepcopy
+import threading
 
 from verifiers import RewardFunc
 from verifiers.envs.multiturn_env import MultiTurnEnv
@@ -21,8 +23,17 @@ Possible moves are:
 
 The first digit in your message will be considered as your move.""",
         few_shot: List[Dict[str, str]] = [],
+        is_slippery: bool = False,
+        map_name: str = "4x4",
         **kwargs,
     ):
+
+        # Store gym configuration
+        self.is_slippery = is_slippery
+        self.map_name = map_name
+
+        # Thread-local storage for accessing state in env_response
+        self._thread_local = threading.local()
 
         # Create initial dataset if none provided
         if dataset is None:
@@ -31,14 +42,6 @@ The first digit in your message will be considered as your move.""",
         super().__init__(
             dataset=dataset, system_prompt=system_prompt, few_shot=few_shot, **kwargs
         )
-
-        # Initialize the FrozenLake environment
-        self.gym_env = gym.make(
-            "FrozenLake-v1", desc=None, map_name="4x4", is_slippery=False
-        )
-
-        # Keep track of game states for each conversation
-        self.game_states: Dict[str, Any] = {}
 
     def create_initial_dataset(self, n_samples: int = 100) -> Dataset:
         """Create a dataset with initial FrozenLake states."""
@@ -61,21 +64,35 @@ The first digit in your message will be considered as your move.""",
 
         return Dataset.from_list(data)
 
-    def reset_game(self, conversation_id: str) -> int:
-        """Reset the game and return initial state."""
-        state, _ = self.gym_env.reset()
-        self.game_states[conversation_id] = {
-            "state": state,
-            "done": False,
+    def initialize_custom_state(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Initialize FrozenLake-specific state fields."""
+        # Create a new gym environment for this conversation
+        gym_env = gym.make(
+            "FrozenLake-v1",
+            desc=None,
+            map_name=self.map_name,
+            is_slippery=self.is_slippery,
+        )
+        state, _ = gym_env.reset()
+
+        return {
+            "gym_env": gym_env,
+            "gym_state": state,
+            "game_done": False,
+            "game_rewards": [],
             "last_reward": 0.0,
-            "game_rewards": [],  # Track rewards for this game
         }
-        return state
 
     def get_grid_layout(self) -> List[List[str]]:
-        """Extract grid layout from the gymnasium environment."""
-        # Get the grid description from the environment
-        desc = self.gym_env.desc
+        """Extract grid layout from a fresh gymnasium environment."""
+        # Create a temporary environment just to get the grid layout
+        temp_env = gym.make(
+            "FrozenLake-v1",
+            desc=None,
+            map_name=self.map_name,
+            is_slippery=self.is_slippery,
+        )
+        desc = temp_env.desc
 
         # Convert bytes to strings if necessary
         if isinstance(desc[0][0], bytes):
@@ -145,6 +162,20 @@ The first digit in your message will be considered as your move.""",
                 return int(char)
         return None
 
+    def step(self, states, llm, sampling_params):
+        """Override step to handle gym state updates properly."""
+        # Store states in thread-local storage for access in env_response
+        self._thread_local.states = states
+
+        # Call parent step method
+        states = super().step(states, llm, sampling_params)
+
+        # Clean up thread-local storage
+        if hasattr(self._thread_local, "states"):
+            delattr(self._thread_local, "states")
+
+        return states
+
     def format_reward_func(
         self, completions: List[List[Dict[str, str]]], **kwargs: Any
     ) -> List[float]:
@@ -182,15 +213,20 @@ The first digit in your message will be considered as your move.""",
         Returns 1.0 if goal reached, 0.0 for other valid moves.
         """
         game_rewards = []
+
         for completion in completions:
-            conversation_id = str(hash(str(completion)))
-            if conversation_id in self.game_states:
-                rewards = self.game_states[conversation_id]["game_rewards"]
-                # Return the final reward (1.0 if reached goal, 0.0 otherwise)
-                final_reward = max(rewards) if rewards else 0.0
-                game_rewards.append(final_reward)
-            else:
-                game_rewards.append(0.0)
+            # Check if goal was reached by looking at environment responses
+            goal_reached = False
+            for msg in completion:
+                if (
+                    msg["role"] == "user"
+                    and "Congratulations! You reached the goal!" in msg["content"]
+                ):
+                    goal_reached = True
+                    break
+
+            game_rewards.append(1.0 if goal_reached else 0.0)
+
         return game_rewards
 
     def get_reward_funcs(self, **kwargs: Any) -> List[RewardFunc]:
@@ -200,22 +236,45 @@ The first digit in your message will be considered as your move.""",
         return [1.0, 1.0]  # Format reward weight  # Game reward weight
 
     def is_completed(self, messages: List[Dict[str, str]], **kwargs: Any) -> bool:
-        """Check if the game is completed."""
-        # Generate a unique conversation ID based on the message history
-        conversation_id = str(hash(str(messages)))
+        """Check if the game is completed by looking for state in thread-local storage."""
+        # Try to get state from thread-local storage
+        if hasattr(self._thread_local, "states"):
+            # Find the state that corresponds to these messages
+            for state in self._thread_local.states:
+                if state["messages"] is messages:
+                    return state.get("game_done", False)
 
-        if conversation_id in self.game_states:
-            return self.game_states[conversation_id]["done"]
+        # Fallback: check messages for completion indicators
+        if len(messages) < 2:
+            return False
 
-        # If we don't have game state, it means we haven't started yet
+        last_user_msg = None
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                last_user_msg = msg
+                break
+
+        if last_user_msg:
+            content = last_user_msg["content"]
+            return (
+                "Game over!" in content
+                or "Congratulations! You reached the goal!" in content
+            )
+
         return False
 
     def env_response(
         self, messages: List[Dict[str, str]], **kwargs: Any
     ) -> Dict[str, str]:
         """Generate environment response after processing the assistant's action."""
-        # Generate conversation ID
-        conversation_id = str(hash(str(messages)))
+        # Try to get the current state from thread-local storage
+        current_state = None
+        if hasattr(self._thread_local, "states"):
+            # Find the state that corresponds to these messages
+            for state in self._thread_local.states:
+                if state["messages"] is messages:
+                    current_state = state
+                    break
 
         # Get the last assistant message
         last_assistant_msg = None
@@ -224,51 +283,47 @@ The first digit in your message will be considered as your move.""",
                 last_assistant_msg = msg
                 break
 
-        # Initialize game if not exists
-        if conversation_id not in self.game_states:
-            initial_state = self.reset_game(conversation_id)
+        # Check if this is the first call (no assistant messages yet)
+        if last_assistant_msg is None:
+            # Initial state
             return {
                 "role": "user",
-                "content": self.get_state_description(initial_state)
-                + "\n\nWhat is your move?",
+                "content": self.get_state_description(0) + "\n\nWhat is your move?",
             }
 
-        game_state = self.game_states[conversation_id]
+        # If we don't have access to state, return error
+        if current_state is None:
+            return {
+                "role": "user",
+                "content": "Error: Unable to access game state. Please try again.",
+            }
 
-        # If game is already done, return final message
-        if game_state["done"]:
-            # TODO: this should not be needed if we end the game!
-            return {"role": "user", "content": "Game completed!"}
-
-        # Parse action from assistant message
-        if last_assistant_msg is None:
-            return {"role": "user", "content": "Please provide a valid move (0-3)."}
-
+        # Parse action from last assistant message
         action = self.parse_action(last_assistant_msg["content"])
 
         if action is None:
             # Invalid action format - end the game
-            game_state["done"] = True
-            game_state["game_rewards"].append(-0.1)  # Format penalty
-            # TODO: this should not be needed if we end the game!
+            current_state["game_done"] = True
+            current_state["game_rewards"].append(-0.1)
             return {
                 "role": "user",
                 "content": "Invalid move format. Game over! Please provide a valid digit (0-3) as your move.",
             }
 
-        # Execute action in the environment
+        # Execute action in the gym environment
+        gym_env = current_state["gym_env"]
         try:
-            next_state, reward, terminated, truncated, _ = self.gym_env.step(action)
+            next_state, reward, terminated, truncated, _ = gym_env.step(action)
             done = terminated or truncated
 
-            # Update game state
-            game_state["state"] = next_state
-            game_state["done"] = done
-            game_state["last_reward"] = reward
-            game_state["game_rewards"].append(reward)
+            # Update state
+            current_state["gym_state"] = next_state
+            current_state["game_done"] = done
+            current_state["last_reward"] = reward
+            current_state["game_rewards"].append(reward)
 
+            # Generate response based on game state
             if done:
-                # TODO: this should not be needed if we end the game!
                 if reward > 0:
                     return {
                         "role": "user",

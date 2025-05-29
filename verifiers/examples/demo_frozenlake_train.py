@@ -16,14 +16,19 @@ CUDA_VISIBLE_DEVICES=0,1 python verifiers/inference/vllm_serve.py --model 'Qwen/
 CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num-processes 2 --config-file configs/zero3.yaml verifiers/examples/demo_frozenlake_train.py
 """
 
-# Create FrozenLake environment with default dataset
-vf_env = vf.FrozenLakeEnv()
+# Configuration options
+IS_SLIPPERY = False  # Set to True for more challenging environment
+BATCH_SIZE = 4      # Reduced from 16 for initial testing
+
+# Create FrozenLake environment with configuration
+vf_env = vf.FrozenLakeEnv(is_slippery=IS_SLIPPERY)
+print(f"FrozenLake Environment (slippery={IS_SLIPPERY})")
 print("System prompt:")
 print(vf_env.system_prompt)
 print(f"\nDataset size: {len(vf_env.dataset)}")
 
 model, tokenizer = vf.get_model_and_tokenizer(model_name)
-run_name = "demo-frozenlake-grpo_" + model_name.split("/")[-1].lower()
+run_name = f"demo-frozenlake-{'slippery' if IS_SLIPPERY else 'normal'}-grpo_" + model_name.split("/")[-1].lower()
 
 training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
@@ -39,7 +44,7 @@ training_args = GRPOConfig(
     beta=0,
     max_prompt_length=512,
     max_completion_length=1536,
-    per_device_train_batch_size=16,
+    per_device_train_batch_size=BATCH_SIZE,
     num_generations=4,
     gradient_accumulation_steps=1,
     gradient_checkpointing=True,
