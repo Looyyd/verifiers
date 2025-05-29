@@ -108,6 +108,7 @@ def test_frozenlake_env():
         messages.append({"role": "assistant", "content": "1"})  # Move right
         state["messages"] = messages
 
+        response = None  # Initialize response
         try:
             response = env.env_response(messages, state=state)
             print("Response after move 1 (right):")
@@ -121,21 +122,22 @@ def test_frozenlake_env():
             print(f"Error after move: {e}")
             print()
 
-        # Test invalid move
-        messages.append(
-            {"role": "user", "content": response["content"]}
-        )  # Add the response
-        messages.append({"role": "assistant", "content": "invalid"})  # Invalid move
-        state["messages"] = messages
+        # Test invalid move (only if we got a valid response)
+        if response is not None:
+            messages.append(
+                {"role": "user", "content": response["content"]}
+            )  # Add the response
+            messages.append({"role": "assistant", "content": "invalid"})  # Invalid move
+            state["messages"] = messages
 
-        try:
-            response = env.env_response(messages, state=state)
-            print("Response after invalid move:")
-            print(response["content"])
-            print()
-        except Exception as e:
-            print(f"Error after invalid move: {e}")
-            print()
+            try:
+                response = env.env_response(messages, state=state)
+                print("Response after invalid move:")
+                print(response["content"])
+                print()
+            except Exception as e:
+                print(f"Error after invalid move: {e}")
+                print()
 
         # Test is_completed with state
         print("Testing is_completed:")
