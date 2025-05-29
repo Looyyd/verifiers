@@ -48,17 +48,14 @@ The first digit in your message will be considered as your move.""",
         # For FrozenLake, we always start at position 0 (top-left)
         initial_state = 0
 
-        # Create dataset entries
+        # Create dataset entries that match the expected format
         data = []
         for i in range(n_samples):
             data.append(
                 {
-                    "prompt": [
-                        {
-                            "role": "user",
-                            "content": self.get_state_description(initial_state),
-                        }
-                    ],
+                    "question": self.get_state_description(initial_state),
+                    "answer": "",  # No specific answer for FrozenLake
+                    "task": "frozenlake",
                 }
             )
 
