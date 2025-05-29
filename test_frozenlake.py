@@ -70,32 +70,81 @@ def test_frozenlake_env():
             print(f"Error accessing gym state: {e}")
         print()
 
-        # Test environment response logic
-        print("Testing environment response (without thread-local state):")
+        # Test environment response WITH state
+        print("Testing environment response (with proper state):")
         messages = [
             {"role": "system", "content": env.system_prompt},
             {"role": "user", "content": "Initial state"},
         ]
 
-        # Test initial response (should work without state)
-        response = env.env_response(messages)
-        print("Initial response:")
-        print(
-            response["content"][:100] + "..."
-            if len(response["content"]) > 100
-            else response["content"]
-        )
-        print()
+        # Initialize state properly
+        state = {
+            "messages": messages,
+            "prompt_messages": len(messages),
+            "prompt_ids": [],
+            "completed": False,
+            "completion_ids": [],
+            "completion_mask": [],
+        }
+        # Add custom state fields
+        custom_state = env.initialize_custom_state(messages)
+        state.update(custom_state)
 
-        # Test with assistant action (will fail without thread-local state)
+        # Test initial response (no assistant message yet)
+        try:
+            response = env.env_response(messages, state=state)
+            print("Initial response:")
+            print(
+                response["content"][:100] + "..."
+                if len(response["content"]) > 100
+                else response["content"]
+            )
+            print()
+        except Exception as e:
+            print(f"Error getting initial response: {e}")
+            print()
+
+        # Test with assistant action
         messages.append({"role": "assistant", "content": "1"})  # Move right
-        response = env.env_response(messages)
-        print("Response after move 1 (without thread-local state):")
-        print(response["content"])
+        state["messages"] = messages
+
+        try:
+            response = env.env_response(messages, state=state)
+            print("Response after move 1 (right):")
+            print(
+                response["content"][:100] + "..."
+                if len(response["content"]) > 100
+                else response["content"]
+            )
+            print()
+        except Exception as e:
+            print(f"Error after move: {e}")
+            print()
+
+        # Test invalid move
+        messages.append(
+            {"role": "user", "content": response["content"]}
+        )  # Add the response
+        messages.append({"role": "assistant", "content": "invalid"})  # Invalid move
+        state["messages"] = messages
+
+        try:
+            response = env.env_response(messages, state=state)
+            print("Response after invalid move:")
+            print(response["content"])
+            print()
+        except Exception as e:
+            print(f"Error after invalid move: {e}")
+            print()
+
+        # Test is_completed with state
+        print("Testing is_completed:")
+        print(f"Completed (with state): {env.is_completed(messages, state=state)}")
+        print(f"Completed (without state, fallback): {env.is_completed(messages)}")
         print()
 
     print("\nNote: Full testing requires running through the trainer")
-    print("which properly manages state through the step() method.")
+    print("which properly manages state through the generate() and step() methods.")
     print("\nTest completed successfully!")
 
 
