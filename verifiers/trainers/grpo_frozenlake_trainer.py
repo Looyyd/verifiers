@@ -88,17 +88,8 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
     ):
         self.vllm_client = None
         if not args.use_vllm:  # type: ignore
-            raise ValueError("vLLM must be enabled for GRPOStandaloneMultiTurnTrainer")
-        if not (
-            callable(reward_funcs)
-            or (
-                isinstance(reward_funcs, list)
-                and all(callable(f) for f in reward_funcs)
-            )
-        ):
-            raise ValueError(
-                "reward_funcs must be a function or a list of functions. Use vLLM to host neural reward models."
-            )
+            raise ValueError("vLLM must be enabled for GRPOFrozenLakeTrainer")
+
         # FrozenLake configuration
         self.is_slippery = is_slippery
         self.map_name = map_name
