@@ -116,7 +116,6 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
         # Multi-turn specific attributes
         self.system_prompt = system_prompt
         self.few_shot = few_shot
-        self.mask_env_response = mask_env_response
         self.max_workers = max_workers
         self.max_steps = max_steps
         self.sleep_time = sleep_time
