@@ -14,6 +14,8 @@ from .utils.data_utils import extract_boxed_answer, extract_hash_answer, preproc
 from .utils.model_utils import get_model, get_tokenizer, get_model_and_tokenizer
 from .utils.config_utils import get_default_grpo_config
 from .utils.logging_utils import setup_logging, print_prompt_completions_sample
+from .trainers.grpo_env_standalone_trainer import GRPODoubleCheckTrainer
+
 
 
 __version__ = "0.1.0"
@@ -30,6 +32,7 @@ __all__ = [
     "ToolEnv",
     "FrozenLakeEnv",
     "GRPOEnvTrainer",
+    "GRPODoubleCheckTrainer",
     "get_model",
     "get_tokenizer",
     "get_model_and_tokenizer",
