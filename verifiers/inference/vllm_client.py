@@ -239,7 +239,10 @@ class VLLMClient:
 
         # Set up the communication group for weight broadcasting
         pg = StatelessProcessGroup.create(host=self.host, port=self.group_port, rank=self.rank, world_size=world_size)
-        self.pynccl_comm = PyNcclCommunicator(pg, device=0)
+        
+        # Get the current CUDA device instead of hardcoding device=0
+        device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        self.pynccl_comm = PyNcclCommunicator(pg, device=device)
 
         # When the client object is deleted, close the weight update group
         atexit.register(self.close_communicator)
