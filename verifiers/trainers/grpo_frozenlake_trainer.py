@@ -105,10 +105,10 @@ H: Hole
 G: Goal
 
 Possible moves are:
-0: UP
-1: RIGHT
-2: DOWN
-3: LEFT
+0: LEFT
+1: DOWN
+2: RIGHT
+3: UP
 
 
 Put your final answer in \\boxed{}, for example \\boxed{0} for UP, \\boxed{1} for RIGHT, etc."""
