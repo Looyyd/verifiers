@@ -4,13 +4,11 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import random
 import time
-from abc import abstractmethod
 
 from accelerate.utils import broadcast_object_list, gather, gather_object
-from datasets import Dataset, IterableDataset
+from datasets import Dataset
 from peft import PeftConfig
 import torch
-from torch import nn
 from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -18,7 +16,6 @@ from transformers import (
     TrainerCallback,
     is_wandb_available,
 )
-from verifiers import RewardFunc
 from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.imports import LLM, SamplingParams
 from verifiers.inference.vllm_client import VLLMClient
@@ -86,7 +83,6 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         max_episode_steps: int = 50,
         **kwargs,
     ):
-        self.vllm_client = None
         if not args.use_vllm:  # type: ignore
             raise ValueError("vLLM must be enabled for GRPOFrozenLakeTrainer")
 
@@ -122,10 +118,6 @@ The first digit in your message will be considered as your move."""
         self.max_workers = kwargs.pop("max_workers", 10)
         self.sleep_time = kwargs.pop("sleep_time", 0.01)
         self.scale_rewards = kwargs.pop("scale_rewards", True)
-
-        # Token IDs - these should match your tokenizer
-        self.eot_id = 151643
-        self.message_end_id = 151645
 
         # Call parent constructor
         super().__init__(
