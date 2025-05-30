@@ -4,6 +4,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import random
 import time
+import re
 
 from accelerate.utils import broadcast_object_list, gather, gather_object
 from datasets import Dataset
@@ -94,7 +95,8 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         self.max_episode_steps = max_episode_steps
 
         # Define system prompt
-        self.system_prompt = """You are an agent playing frozen lake.
+        self.system_prompt = """You are playing a game called frozen lake. 
+In this game you move around a grid, and you win when the Agent reaches the Goal. If you fall into a hole, you lose.
 You will be given grids by the user, propose the best move.
 
 The Legend is:
@@ -110,13 +112,13 @@ Possible moves are:
 2: RIGHT
 3: UP
 
-You should think about your move first using <thinking></thinking> tags, then give your final answer.
+You should think about your move first using <think></think> tags, then give your final answer.
 Put your final answer in \\boxed{}, for example \\boxed{0} for LEFT, \\boxed{1} for DOWN, etc.
 
 Example format:
-<thinking>
+<think>
 I need to analyze the current state and find the best path to the goal while avoiding holes...
-</thinking>
+</think>
 
 \\boxed{2}"""
 
@@ -156,10 +158,11 @@ I need to analyze the current state and find the best path to the goal while avo
 
         self.sampling_params = SamplingParams(
             max_tokens=self.max_completion_length,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=-1 if self.top_k is None else self.top_k,
-            min_p=0.0 if self.min_p is None else self.min_p,
+            # Config recommended for Qwen 3 thinking, it's probably a good default for thinking tasks
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.0,
             repetition_penalty=self.repetition_penalty,
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
@@ -271,12 +274,7 @@ I need to analyze the current state and find the best path to the goal while avo
 
             content = last_assistant_msg["content"]
 
-            # Check for thinking tags
-            import re
-
-            has_thinking = bool(
-                re.search(r"<thinking>.*?</thinking>", content, re.DOTALL)
-            )
+            has_thinking = bool(re.search(r"<think>.*?</think>", content, re.DOTALL))
 
             # Check for valid boxed answer
             action = self._parse_action(content)
