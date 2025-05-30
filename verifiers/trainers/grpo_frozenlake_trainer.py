@@ -110,9 +110,15 @@ Possible moves are:
 2: RIGHT
 3: UP
 
+You should think about your move first using <thinking></thinking> tags, then give your final answer.
+Put your final answer in \\boxed{}, for example \\boxed{0} for LEFT, \\boxed{1} for DOWN, etc.
 
-You can think before you answer.
-Put your final answer in \\boxed{}, for example \\boxed{0} for UP, \\boxed{1} for RIGHT, etc."""
+Example format:
+<thinking>
+I need to analyze the current state and find the best path to the goal while avoiding holes...
+</thinking>
+
+\\boxed{2}"""
 
         # Store gym environments indexed by a unique ID
         self._gym_envs = {}
@@ -250,8 +256,46 @@ Put your final answer in \\boxed{}, for example \\boxed{0} for UP, \\boxed{1} fo
             outcome = episode_outcomes[i]
             if outcome == "invalid_action":
                 rewards.append(-0.1)
+                continue
+
+            # Check the last assistant message for proper format
+            last_assistant_msg = None
+            for msg in reversed(completion):
+                if msg["role"] == "assistant":
+                    last_assistant_msg = msg
+                    break
+
+            if last_assistant_msg is None:
+                rewards.append(-0.1)
+                continue
+
+            content = last_assistant_msg["content"]
+
+            # Check for thinking tags
+            import re
+
+            has_thinking = bool(
+                re.search(r"<thinking>.*?</thinking>", content, re.DOTALL)
+            )
+
+            # Check for valid boxed answer
+            action = self._parse_action(content)
+            has_valid_answer = action is not None
+
+            # Reward structure:
+            # +0.1 if has thinking tags
+            # +0.1 if has valid boxed answer
+            # 0.0 baseline for valid format
+            # -0.1 for invalid action (handled above)
+
+            if has_thinking and has_valid_answer:
+                rewards.append(0.2)  # Full credit for perfect format
+            elif has_valid_answer:
+                rewards.append(0.1)  # Partial credit for answer without thinking
+            elif has_thinking:
+                rewards.append(0.05)  # Small credit for thinking without valid answer
             else:
-                rewards.append(0.0)
+                rewards.append(0.0)  # No bonus for poor format
 
         return rewards
 
