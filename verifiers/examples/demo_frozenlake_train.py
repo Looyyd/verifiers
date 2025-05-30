@@ -70,7 +70,6 @@ trainer = GRPOFrozenLakeTrainer(
     args=training_args,
     processing_class=tokenizer,
     is_slippery=IS_SLIPPERY,
-    map_name="4x4",
     n_initial_samples=N_INITIAL_SAMPLES,
     format_reward_weight=FORMAT_REWARD_WEIGHT,
     game_reward_weight=GAME_REWARD_WEIGHT,

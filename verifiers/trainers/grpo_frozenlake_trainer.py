@@ -380,7 +380,6 @@ I need to analyze the current state and find the best path to the goal while avo
                 gym_env = gym.make(
                     "FrozenLake-v1",
                     desc=map_descs[i],
-                    map_name=None,
                     is_slippery=self.is_slippery,
                 )
             else:
@@ -390,7 +389,6 @@ I need to analyze the current state and find the best path to the goal while avo
                     desc=generate_random_frozenlake_map(
                         4, self.frozen_tile_probability
                     ),
-                    map_name=None,
                     is_slippery=self.is_slippery,
                 )
             initial_state, _ = gym_env.reset()
