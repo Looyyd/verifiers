@@ -36,6 +36,9 @@ from trl.trainer.utils import pad
 if is_wandb_available():
     import wandb
 
+# Add gymnasium import
+import gymnasium as gym
+
 
 # torch.nanstd doesn't exist, so we define it here
 def nanstd(tensor: torch.Tensor) -> torch.Tensor:
@@ -58,32 +61,29 @@ def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(variance)
 
 
-class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
+class GRPOFrozenLakeTrainer(GRPOTrainer):
     """
-    A standalone GRPO trainer with built-in multi-turn environment logic.
-    This integrates the multiturn environment directly into the trainer for easier customization.
+    A GRPO trainer specifically for FrozenLake environment.
+    Inherits directly from GRPOTrainer to allow custom modifications.
     """
 
     def __init__(
         self,
         model: Union[str, PreTrainedModel],
-        reward_funcs: Union[RewardFunc, list[RewardFunc]],
-        scale_rewards: bool = False,
         args: Optional[GRPOConfig] = None,
-        train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-        eval_dataset: Optional[Union[Dataset, IterableDataset]] = None,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[
             Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]
         ] = (None, None),
         peft_config: Optional["PeftConfig"] = None,
-        # Multi-turn specific parameters
-        system_prompt: str = "",
-        few_shot: List[Dict[str, str]] = [],
-        max_workers: int = 10,
-        max_steps: int = 10,
-        sleep_time: float = 1.0,
+        # FrozenLake specific parameters
+        is_slippery: bool = False,
+        map_name: str = "4x4",
+        n_initial_samples: int = 100,
+        format_reward_weight: float = 1.0,
+        game_reward_weight: float = 10.0,
+        max_episode_steps: int = 50,
         **kwargs,
     ):
         self.vllm_client = None
@@ -99,13 +99,50 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
             raise ValueError(
                 "reward_funcs must be a function or a list of functions. Use vLLM to host neural reward models."
             )
+        # FrozenLake configuration
+        self.is_slippery = is_slippery
+        self.map_name = map_name
+        self.format_reward_weight = format_reward_weight
+        self.game_reward_weight = game_reward_weight
+        self.max_episode_steps = max_episode_steps
 
+        # Create initial dataset
+        train_dataset = self._create_initial_dataset(n_initial_samples)
+
+        # Define system prompt
+        self.system_prompt = """You are an agent playing frozen lake.
+You will be given grids by the user, propose the best move.
+Possible moves are:
+0: UP
+1: RIGHT
+2: DOWN
+3: LEFT
+
+The first digit in your message will be considered as your move."""
+
+        # Define reward functions
+        reward_funcs = [self._format_reward_func, self._game_reward_func]
+
+        # Store gym environments indexed by a unique ID
+        self._gym_envs = {}
+        self._next_env_id = 0
+
+        # Multi-turn specific attributes
+        self.max_workers = kwargs.pop("max_workers", 10)
+        self.sleep_time = kwargs.pop("sleep_time", 0.01)
+        self.scale_rewards = kwargs.pop("scale_rewards", True)
+
+        # Token IDs - these should match your tokenizer
+        self.eot_id = 151643
+        self.message_end_id = 151645
+
+        # Call parent constructor
         super().__init__(
             model=model,
             reward_funcs=reward_funcs,
             args=args,
             train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            eval_dataset=None,
             processing_class=processing_class,
             callbacks=callbacks,
             optimizers=optimizers,
@@ -113,93 +150,219 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
             **kwargs,
         )
 
-        # Multi-turn specific attributes
-        self.system_prompt = system_prompt
-        self.few_shot = few_shot
-        self.max_workers = max_workers
-        self.max_steps = max_steps
-        self.sleep_time = sleep_time
-        self.scale_rewards = scale_rewards
-
-        # Token IDs - these should match your tokenizer
-        self.eot_id = 151643
-        self.message_end_id = 151645
-
-        # Sampling parameters for generation
-        self.sampling_params = SamplingParams(
-            max_tokens=self.max_completion_length,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=-1 if self.top_k is None else self.top_k,
-            min_p=0.0 if self.min_p is None else self.min_p,
-            repetition_penalty=self.repetition_penalty,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
+        # Set reward weights after init
+        self.reward_weights = torch.tensor(
+            [self.format_reward_weight, self.game_reward_weight]
         )
 
-    @abstractmethod
-    def is_completed(
+        # Override sampling params
+        if hasattr(self, "sampling_params"):
+            self.sampling_params = SamplingParams(
+                max_tokens=self.max_completion_length,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=-1 if self.top_k is None else self.top_k,
+                min_p=0.0 if self.min_p is None else self.min_p,
+                repetition_penalty=self.repetition_penalty,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+            )
+
+    def _create_initial_dataset(self, n_samples: int) -> Dataset:
+        """Create a dataset with initial FrozenLake states."""
+        data = []
+        for i in range(n_samples):
+            # Initial state description
+            initial_prompt = self._get_initial_state_description()
+            # Add system prompt and initial state
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": initial_prompt})
+
+            data.append({"prompt": messages})
+        return Dataset.from_list(data)
+
+    def _get_initial_state_description(self) -> str:
+        """Get description of initial state."""
+        # Create a temporary env to get the grid layout
+        temp_env = gym.make(
+            "FrozenLake-v1",
+            desc=None,
+            map_name=self.map_name,
+            is_slippery=self.is_slippery,
+        )
+        grid = self._get_grid_from_env(temp_env)
+        temp_env.close()
+
+        # Agent starts at position 0 (top-left)
+        return self._state_to_description(0, grid)
+
+    def _get_grid_from_env(self, env: gym.Env) -> List[List[str]]:
+        """Extract grid layout from gymnasium environment."""
+        desc = env.unwrapped.desc
+        # Convert bytes to strings if necessary
+        if isinstance(desc[0][0], bytes):
+            grid = [[cell.decode("utf-8") for cell in row] for row in desc]
+        else:
+            grid = [[str(cell) for cell in row] for row in desc]
+        return grid
+
+    def _state_to_description(self, state: int, grid: List[List[str]]) -> str:
+        """Convert state number to text description."""
+        ncol = len(grid[0])
+        row = state // ncol
+        col = state % ncol
+
+        # Create display grid with agent position
+        display_grid = [row[:] for row in grid]  # Deep copy
+        display_grid[row][col] = "A"  # Agent symbol
+
+        # Format as string
+        grid_str = "Current grid state:\n"
+        for grid_row in display_grid:
+            grid_str += " ".join(grid_row) + "\n"
+
+        # Add legend
+        grid_str += "\nLegend: A=Agent, S=Start, F=Frozen, H=Hole, G=Goal"
+        return grid_str
+
+    def _parse_action(self, message: str) -> Optional[int]:
+        """Parse action from assistant message."""
+        if len(message) == 0:
+            return None
+
+        # Find the first digit in the message
+        for char in message:
+            if char.isdigit() and char in "0123":
+                return int(char)
+        return None
+
+    def _format_reward_func(
         self,
-        messages: List[Dict[str, str]],
-        state: Dict[str, Any] | None = None,
+        prompts: List[List[Dict[str, str]]],
+        completions: List[List[Dict[str, str]]],
         **kwargs: Any,
-    ) -> bool:
-        """
-        Check if the conversation is completed.
-        Override this in subclasses for specific completion logic.
+    ) -> List[float]:
+        """Reward function that checks if the response format is correct."""
+        rewards = []
+        for completion in completions:
+            # Look for invalid action messages
+            invalid_action = False
+            for msg in completion:
+                if msg["role"] == "user" and "Invalid move format" in msg["content"]:
+                    invalid_action = True
+                    break
 
-        Args:
-            messages: List of conversation messages
-            state: Optional state dictionary with custom fields
+            if invalid_action:
+                rewards.append(-0.1)
+            else:
+                rewards.append(0.0)
 
-        Returns:
-            bool: True if conversation is completed
-        """
-        pass
+        return rewards
 
-    @abstractmethod
-    def env_response(
+    def _game_reward_func(
         self,
-        messages: List[Dict[str, str]],
-        state: Dict[str, Any] | None = None,
+        prompts: List[List[Dict[str, str]]],
+        completions: List[List[Dict[str, str]]],
         **kwargs: Any,
-    ) -> Dict[str, str]:
-        """
-        Generate environment response based on conversation history.
-        Override this in subclasses for specific environment behavior.
+    ) -> List[float]:
+        """Reward function that returns the game rewards from FrozenLake."""
+        rewards = []
 
-        Args:
-            messages: List of conversation messages
-            state: Optional state dictionary with custom fields
+        for completion in completions:
+            # Check if goal was reached
+            goal_reached = False
+            for msg in completion:
+                if (
+                    msg["role"] == "user"
+                    and "Congratulations! You reached the goal!" in msg["content"]
+                ):
+                    goal_reached = True
+                    break
 
-        Returns:
-            Dict with 'role' and 'content' for the environment response
-        """
-        pass
+            rewards.append(1.0 if goal_reached else 0.0)
 
-    def initialize_custom_state(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """
-        Override this method in subclasses to add custom state fields.
-        Called when initializing a new state.
-        """
-        return {}
+        return rewards
 
-    def update_custom_state(
-        self, state: Dict[str, Any], messages: List[Dict[str, str]]
-    ) -> None:
-        """
-        Override this method in subclasses to update custom state fields.
-        Called after each step.
-        """
-        pass
+    def generate_multiturn(
+        self,
+        prompts: List[List[Dict[str, Any]]],
+        llm: LLM | VLLMClient,
+        sampling_params: SamplingParams,
+        **kwargs: Any,
+    ) -> Dict[str, List[Sequence[int]] | List[str] | List[List[Dict[str, Any]]]]:
+        """Generate multi-turn FrozenLake episodes."""
 
-    def step(
+        # Initialize states
+        states = []
+        for m in prompts:
+            env_id = self._next_env_id
+            self._next_env_id += 1
+
+            # Create new gym environment
+            gym_env = gym.make(
+                "FrozenLake-v1",
+                desc=None,
+                map_name=self.map_name,
+                is_slippery=self.is_slippery,
+            )
+            initial_state, _ = gym_env.reset()
+            grid = self._get_grid_from_env(gym_env)
+
+            # Store environment
+            self._gym_envs[env_id] = {
+                "env": gym_env,
+                "state": initial_state,
+                "grid": grid,
+                "done": False,
+                "episode_reward": 0.0,
+            }
+
+            state = {
+                "messages": m,
+                "prompt_messages": len(m),
+                "prompt_ids": [],
+                "completed": False,
+                "completion_ids": [],
+                "completion_mask": [],
+                "gym_env_id": env_id,
+                "steps": 0,
+            }
+            states.append(state)
+
+        # Main episode loop
+        all_completed = False
+        while not all_completed and all(
+            s["steps"] < self.max_episode_steps for s in states
+        ):
+            states = self.step_frozenlake(states, llm, sampling_params)
+            all_completed = all(state["completed"] for state in states)
+
+        # Extract results
+        completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
+        completion_ids = [s["completion_ids"] for s in states]
+        completion_mask = [s["completion_mask"] for s in states]
+
+        # Clean up environments
+        for env_info in self._gym_envs.values():
+            if "env" in env_info:
+                env_info["env"].close()
+        self._gym_envs.clear()
+
+        return {
+            "ids": completion_ids,
+            "messages": completion_messages,
+            "mask": completion_mask,
+        }
+
+    def step_frozenlake(
         self,
         states: List[Dict[str, Any]],
         llm: LLM | VLLMClient,
         sampling_params: SamplingParams,
     ) -> List[Dict[str, Any]]:
-        """Execute one step of multi-turn conversation for all active states."""
+        """Execute one step of FrozenLake for all active states."""
 
         live_indices = [i for i, s in enumerate(states) if not s["completed"]]
         messages_to_step = [states[i]["messages"] for i in live_indices]
@@ -236,18 +399,26 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
             state = deepcopy(states[j])
             if len(state["prompt_ids"]) == 0:
                 state["prompt_ids"] = llm_response.prompt_token_ids
-            state["messages"].append(
-                {"role": "assistant", "content": llm_response.outputs[0].text}
-            )
 
-            # Get token lengths of env response and new completion
+            # Add assistant message
+            assistant_msg = {
+                "role": "assistant",
+                "content": llm_response.outputs[0].text,
+            }
+            state["messages"].append(assistant_msg)
+
+            # Update token tracking
             total_prev_len = len(state["prompt_ids"]) + len(state["completion_ids"])
             env_response_len = len(list(llm_response.prompt_token_ids)) - total_prev_len
             new_completion_len = len(llm_response.outputs[0].token_ids)
 
             # Update completion masks
-            state["completion_mask"].extend([0] * env_response_len)
-            state["completion_mask"].extend([1] * new_completion_len)
+            state["completion_mask"].extend(
+                [0] * env_response_len
+            )  # Environment tokens masked
+            state["completion_mask"].extend(
+                [1] * new_completion_len
+            )  # Assistant tokens not masked
 
             # Update completion ids
             state["completion_ids"] = list(llm_response.prompt_token_ids)
@@ -256,31 +427,91 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                 len(state["prompt_ids"]) :
             ]
 
-            # Handle message end tokens
-            if (
-                state["completion_ids"][-1] != 198
-                and state["completion_ids"][-2] != self.message_end_id
-            ):
-                state["completion_ids"].append(self.message_end_id)
-                state["completion_ids"].append(198)
-                state["completion_mask"].append(1)
-                state["completion_mask"].append(1)
+            # Parse action and execute gym step
+            env_id = state["gym_env_id"]
+            env_info = self._gym_envs[env_id]
 
-            # Fix mask/id length mismatch
-            if len(state["completion_ids"]) > len(state["completion_mask"]):
-                state["completion_mask"].extend(
-                    [1] * (len(state["completion_ids"]) - len(state["completion_mask"]))
+            action = self._parse_action(assistant_msg["content"])
+
+            if action is None:
+                # Invalid action - terminate
+                env_info["done"] = True
+                state["completed"] = True
+                # Add termination message
+                invalid_msg = {
+                    "role": "user",
+                    "content": "Invalid move format. Game over! Please provide a valid digit (0-3) as your move.",
+                }
+                state["messages"].append(invalid_msg)
+                # We need to tokenize this message and add to masks
+                # For now, we'll estimate it as 20 tokens and mask them as env tokens
+                state["completion_mask"].extend([0] * 20)
+                state["completion_ids"].extend(
+                    [self.processing_class.pad_token_id] * 20
                 )
-            if len(state["completion_mask"]) > len(state["completion_ids"]):
-                state["completion_mask"] = state["completion_mask"][
-                    : len(state["completion_ids"])
-                ]
+            else:
+                # Execute action in gym
+                gym_env = env_info["env"]
+                try:
+                    next_state, reward, terminated, truncated, info = gym_env.step(
+                        action
+                    )
+                    done = terminated or truncated
 
-            # Check completion with state access
-            if (
-                self.is_completed(state["messages"], state=state)
-                or len(state["completion_ids"]) > sampling_params.max_tokens - 1
-            ):
+                    env_info["state"] = next_state
+                    env_info["done"] = done
+                    env_info["episode_reward"] += reward
+
+                    if done:
+                        # Episode completed
+                        state["completed"] = True
+                        # Add final message
+                        if reward > 0:
+                            final_msg = {
+                                "role": "user",
+                                "content": self._state_to_description(
+                                    next_state, env_info["grid"]
+                                )
+                                + "\n\nCongratulations! You reached the goal!",
+                            }
+                        else:
+                            final_msg = {
+                                "role": "user",
+                                "content": self._state_to_description(
+                                    next_state, env_info["grid"]
+                                )
+                                + "\n\nGame over! You fell into a hole.",
+                            }
+                        state["messages"].append(final_msg)
+                        # Estimate tokens for final message
+                        state["completion_mask"].extend([0] * 50)
+                        state["completion_ids"].extend(
+                            [self.processing_class.pad_token_id] * 50
+                        )
+                    else:
+                        # Continue episode
+                        env_msg = {
+                            "role": "user",
+                            "content": self._state_to_description(
+                                next_state, env_info["grid"]
+                            ),
+                        }
+                        state["messages"].append(env_msg)
+                        # Don't update masks here - will be handled in next iteration
+
+                except Exception as e:
+                    # Error in gym step
+                    state["completed"] = True
+                    env_info["done"] = True
+                    raise RuntimeError(
+                        f"Error executing action in gym environment: {str(e)}"
+                    )
+
+            # Increment step counter
+            state["steps"] += 1
+
+            # Truncate if too long
+            if len(state["completion_ids"]) > sampling_params.max_tokens:
                 state["completed"] = True
                 state["completion_ids"] = state["completion_ids"][
                     : sampling_params.max_tokens
@@ -288,22 +519,11 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                 state["completion_mask"] = state["completion_mask"][
                     : len(state["completion_ids"])
                 ]
-            else:
-                # Call env_response with state access
-                state["messages"].append(
-                    self.env_response(state["messages"], state=state)
-                )
-                # Update custom state after environment response
-                self.update_custom_state(state, state["messages"])
 
-            # Enforce that the completion mask and completion ids are the same length
-            if not len(state["completion_mask"]) == len(state["completion_ids"]):
-                print(f"Warning: mask/id length mismatch. Fixing...")
-                min_len = min(
-                    len(state["completion_mask"]), len(state["completion_ids"])
-                )
-                state["completion_mask"] = state["completion_mask"][:min_len]
-                state["completion_ids"] = state["completion_ids"][:min_len]
+            # Ensure mask and ids have same length
+            min_len = min(len(state["completion_mask"]), len(state["completion_ids"]))
+            state["completion_mask"] = state["completion_mask"][:min_len]
+            state["completion_ids"] = state["completion_ids"][:min_len]
 
             return j, state
 
@@ -321,61 +541,25 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
 
         return states
 
-    def generate_multiturn(
-        self,
-        prompts: List[List[Dict[str, Any]]],
-        llm: LLM | VLLMClient,
-        sampling_params: SamplingParams,
-        **kwargs: Any,
-    ) -> Dict[str, List[Sequence[int]] | List[str] | List[List[Dict[str, Any]]]]:
-        """Generate multi-turn conversations with proper masking."""
-
-        # Initialize state variables
-        all_completed = False
-        states = []
-        for m in prompts:
-            state = {
-                "messages": m,
-                "prompt_messages": len(m),
-                "prompt_ids": [],
-                "completed": False,
-                "completion_ids": [],
-                "completion_mask": [],
-            }
-            # Add custom state fields from subclass
-            custom_state = self.initialize_custom_state(m)
-            state.update(custom_state)
-            states.append(state)
-
-        # Main loop
-        step_count = 0
-        while not all_completed and step_count < self.max_steps:
-            states = self.step(states, llm, sampling_params)
-            all_completed = all(state["completed"] for state in states)
-            step_count += 1
-
-        completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
-        completion_ids = [s["completion_ids"] for s in states]
-        completion_mask = [s["completion_mask"] for s in states]
-
-        return {
-            "ids": completion_ids,
-            "messages": completion_messages,
-            "mask": completion_mask,
-        }
-
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
-        """Generate completions and score them with reward functions."""
+        """Override to use FrozenLake-specific generation."""
 
         device = self.accelerator.device
-        prompts = [x["prompt"] for x in inputs]  # type: ignore
-        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]  # type: ignore
+        prompts = [x["prompt"] for x in inputs]
+        prompts_text = [
+            maybe_apply_chat_template(example, self.processing_class)["prompt"]
+            for example in inputs
+        ]
         prompt_inputs = self.processing_class(
-            prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False  # type: ignore
-        )  # type: ignore
-        prompt_inputs = Trainer._prepare_inputs(self, prompt_inputs)  # type: ignore
+            prompts_text,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+            add_special_tokens=False,
+        )
+        prompt_inputs = Trainer._prepare_inputs(self, prompt_inputs)
         prompt_ids, prompt_mask = (
             prompt_inputs["input_ids"],
             prompt_inputs["attention_mask"],
@@ -389,12 +573,12 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
             self._move_model_to_vllm()
             self._last_loaded_step = self.state.global_step
 
-        # Gather the original prompts in message dict form
+        # Gather prompts for multi-turn generation
         all_prompts = gather_object(prompts)
         if self.accelerator.is_main_process:
             env_result = self.generate_multiturn(
                 prompts=all_prompts,
-                llm=self.vllm_client,  # type: ignore
+                llm=self.vllm_client,
                 sampling_params=self.sampling_params,
             )
             completion_ids = env_result["ids"]
@@ -418,9 +602,11 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
         completion_messages = completion_messages[process_slice]
         completion_mask = completion_mask[process_slice]
 
-        # Pad + mask after per-sequence EOS tokens
+        # Pad completions
         completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-        completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)  # type: ignore
+        completion_ids = pad(
+            completion_ids, padding_value=self.processing_class.pad_token_id
+        )
 
         completion_mask = [
             torch.tensor(mask, device=device) for mask in completion_mask
@@ -428,12 +614,12 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
         completion_mask = pad(completion_mask, padding_value=0)
 
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
 
         logits_to_keep = completion_ids.size(1)
 
+        # Compute logps
         with torch.no_grad():
-            # When using num_iterations == 1, old_per_token_logps == per_token_logps
             if self.num_iterations > 1:
                 old_per_token_logps = self._get_per_token_logps(
                     self.model, prompt_completion_ids, attention_mask, logits_to_keep
@@ -459,16 +645,17 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                         logits_to_keep,
                     )
 
-        # Use message dicts for reward function inputs
+        # Compute rewards
         completions = completion_messages
         rewards_per_func = torch.zeros(
             len(prompts), len(self.reward_funcs), device=device
         )
         for i, reward_func in enumerate(self.reward_funcs):
-            # Repeat all input columns (but "prompt" and "completion") to match the number of generations
-            keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]  # type: ignore
-            reward_kwargs = {key: [example[key] for example in inputs] for key in keys}  # type: ignore
-            output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)  # type: ignore
+            keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
+            reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
+            output_reward_func = reward_func(
+                prompts=prompts, completions=completions, **reward_kwargs
+            )
 
             output_reward_func = [
                 reward if reward is not None else torch.nan
@@ -478,61 +665,53 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                 output_reward_func, dtype=torch.float32, device=device
             )
 
-        # If all reward functions return None for a given row, issue a warning
-        if torch.isnan(rewards_per_func).all(dim=1).any():
-            nan_row_idx = (
-                torch.isnan(rewards_per_func).all(dim=1).nonzero(as_tuple=True)[0][0]
-            )
-            row_reward_kwargs = {key: value[nan_row_idx] for key, value in reward_kwargs.items()}  # type: ignore
-            row_reward_kwargs["prompt"] = prompts[nan_row_idx]
-            row_reward_kwargs["completion"] = completions[nan_row_idx]  # type: ignore
-            warnings.warn(
-                f"All reward functions returned None for the following kwargs: {row_reward_kwargs}. "
-                "Please ensure that at least one reward function returns a valid reward."
-            )
-
         rewards_per_func = gather(rewards_per_func)
 
-        # Apply weights to each reward function's output and sum
+        # Apply weights
         rewards = (
             rewards_per_func * self.reward_weights.to(device).unsqueeze(0)
         ).nansum(dim=1)
 
-        # Compute grouped-wise rewards
-        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)  # type: ignore
-
-        # Normalize the rewards to compute the advantages
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)  # type: ignore
+        # Compute advantages
+        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(
+            self.num_generations, dim=0
+        )
         advantages = rewards - mean_grouped_rewards
 
-        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)  # type: ignore
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)  # type: ignore
+        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
+        std_grouped_rewards = std_grouped_rewards.repeat_interleave(
+            self.num_generations, dim=0
+        )
         if self.scale_rewards:
-            # Scale the rewards
             advantages = advantages / (std_grouped_rewards + 1e-4)
 
-        # Slice to keep only the local part of the data
+        # Slice for local process
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
             (self.accelerator.process_index + 1) * len(prompts),
         )
         advantages = advantages[process_slice]
 
-        # Log the metrics
+        # Log metrics
         mode = "eval" if self.control.should_evaluate else "train"
 
-        completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()  # type: ignore
+        completion_length = (
+            self.accelerator.gather_for_metrics(completion_mask.sum(1))
+            .float()
+            .mean()
+            .item()
+        )
         self._metrics[mode]["completion_length"].append(completion_length)
 
-        # Calculate mean reward per function
         for i, reward_func in enumerate(self.reward_funcs):
-            reward_func_name = reward_func.__name__  # type: ignore
+            reward_func_name = reward_func.__name__
             mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}"].append(mean_rewards)
             std_rewards = nanstd(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/std"].append(std_rewards)
         self._metrics[mode]["reward"].append(rewards.mean().item())
-        self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())  # type: ignore
+        self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
 
         if (
             self.log_completions
@@ -550,10 +729,13 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                         [rewards_to_log[0]],
                         self.state.global_step,
                     )
-                if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:  # type: ignore
+                if (
+                    self.args.report_to
+                    and "wandb" in self.args.report_to
+                    and wandb.run is not None
+                ):
                     import pandas as pd
 
-                    # For logging
                     table = {
                         "step": [str(self.state.global_step)] * len(rewards),
                         "prompt": prompts_to_log,
@@ -561,7 +743,7 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
                         "reward": rewards.tolist(),
                     }
                     df = pd.DataFrame(table)
-                    wandb.log({"completions": wandb.Table(dataframe=df)})  # type: ignore
+                    wandb.log({"completions": wandb.Table(dataframe=df)})
 
         return {
             "prompt_ids": prompt_ids,
@@ -572,3 +754,9 @@ class GRPOStandaloneMultiTurnTrainer(GRPOTrainer):
             "ref_per_token_logps": ref_per_token_logps,
             "advantages": advantages,
         }
+
+    def __del__(self):
+        """Clean up gym environments when trainer is destroyed."""
+        for env_info in self._gym_envs.values():
+            if "env" in env_info:
+                env_info["env"].close()
