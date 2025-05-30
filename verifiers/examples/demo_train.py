@@ -31,6 +31,9 @@ print(vf_env.system_prompt)
 model, tokenizer = vf.get_model_and_tokenizer(model_name)
 run_name = "demo-grpo_" + model_name.split("/")[-1].lower()
 
+# Import the standalone trainer
+from verifiers.trainers.grpo_env_standalone_trainer import GRPODoubleCheckTrainer
+
 training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
@@ -60,12 +63,15 @@ training_args = GRPOConfig(
     reward_weights=vf_env.get_reward_weights(),
 )
 
-trainer = vf.GRPOEnvTrainer(
+# Use the standalone trainer instead of GRPOEnvTrainer
+trainer = GRPODoubleCheckTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=vf_env.get_reward_funcs(),
-    env=vf_env,
     args=training_args,
     train_dataset=vf_env.get_dataset(),
+    # Multi-turn specific parameters
+    system_prompt=SIMPLE_PROMPT,
+    few_shot=[],
 )
 trainer.train()
