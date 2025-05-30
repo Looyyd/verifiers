@@ -138,18 +138,16 @@ The first digit in your message will be considered as your move."""
             [self.format_reward_weight, self.game_reward_weight]
         )
 
-        # Override sampling params
-        if hasattr(self, "sampling_params"):
-            self.sampling_params = SamplingParams(
-                max_tokens=self.max_completion_length,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=-1 if self.top_k is None else self.top_k,
-                min_p=0.0 if self.min_p is None else self.min_p,
-                repetition_penalty=self.repetition_penalty,
-                skip_special_tokens=False,
-                spaces_between_special_tokens=False,
-            )
+        self.sampling_params = SamplingParams(
+            max_tokens=self.max_completion_length,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=-1 if self.top_k is None else self.top_k,
+            min_p=0.0 if self.min_p is None else self.min_p,
+            repetition_penalty=self.repetition_penalty,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+        )
 
     def _create_initial_dataset(self, n_samples: int) -> Dataset:
         """Create a dataset with initial FrozenLake states."""
