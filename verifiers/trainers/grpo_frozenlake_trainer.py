@@ -246,15 +246,12 @@ The first digit in your message will be considered as your move."""
     ) -> List[float]:
         """Reward function that checks if the response format is correct."""
         rewards = []
-        for completion in completions:
-            # Look for invalid action messages
-            invalid_action = False
-            for msg in completion:
-                if msg["role"] == "user" and "Invalid move format" in msg["content"]:
-                    invalid_action = True
-                    break
+        # Get episode outcomes from kwargs if available
+        episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
 
-            if invalid_action:
+        for i, completion in enumerate(completions):
+            outcome = episode_outcomes[i]
+            if outcome == "invalid_action":
                 rewards.append(-0.1)
             else:
                 rewards.append(0.0)
@@ -269,19 +266,11 @@ The first digit in your message will be considered as your move."""
     ) -> List[float]:
         """Reward function that returns the game rewards from FrozenLake."""
         rewards = []
+        # Get episode outcomes from kwargs if available
+        episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
 
-        for completion in completions:
-            # Check if goal was reached
-            goal_reached = False
-            for msg in completion:
-                if (
-                    msg["role"] == "user"
-                    and "Congratulations! You reached the goal!" in msg["content"]
-                ):
-                    goal_reached = True
-                    break
-
-            rewards.append(1.0 if goal_reached else 0.0)
+        for outcome in episode_outcomes:
+            rewards.append(1.0 if outcome == "goal_reached" else 0.0)
 
         return rewards
 
@@ -328,6 +317,7 @@ The first digit in your message will be considered as your move."""
                 "completion_mask": [],
                 "gym_env_id": env_id,
                 "steps": 0,
+                "episode_outcome": None,  # Track outcome for reward functions
             }
             states.append(state)
 
@@ -343,6 +333,7 @@ The first digit in your message will be considered as your move."""
         completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
         completion_ids = [s["completion_ids"] for s in states]
         completion_mask = [s["completion_mask"] for s in states]
+        episode_outcomes = [s["episode_outcome"] for s in states]
 
         # Clean up environments
         for env_info in self._gym_envs.values():
@@ -354,6 +345,7 @@ The first digit in your message will be considered as your move."""
             "ids": completion_ids,
             "messages": completion_messages,
             "mask": completion_mask,
+            "episode_outcomes": episode_outcomes,
         }
 
     def step_frozenlake(
@@ -437,18 +429,8 @@ The first digit in your message will be considered as your move."""
                 # Invalid action - terminate
                 env_info["done"] = True
                 state["completed"] = True
-                # Add termination message
-                invalid_msg = {
-                    "role": "user",
-                    "content": "Invalid move format. Game over! Please provide a valid digit (0-3) as your move.",
-                }
-                state["messages"].append(invalid_msg)
-                # We need to tokenize this message and add to masks
-                # For now, we'll estimate it as 20 tokens and mask them as env tokens
-                state["completion_mask"].extend([0] * 20)
-                state["completion_ids"].extend(
-                    [self.processing_class.pad_token_id] * 20
-                )
+                state["episode_outcome"] = "invalid_action"
+                # Don't add any message - just mark as completed
             else:
                 # Execute action in gym
                 gym_env = env_info["env"]
@@ -465,29 +447,12 @@ The first digit in your message will be considered as your move."""
                     if done:
                         # Episode completed
                         state["completed"] = True
-                        # Add final message
+                        # Track outcome without adding messages
                         if reward > 0:
-                            final_msg = {
-                                "role": "user",
-                                "content": self._state_to_description(
-                                    next_state, env_info["grid"]
-                                )
-                                + "\n\nCongratulations! You reached the goal!",
-                            }
+                            state["episode_outcome"] = "goal_reached"
                         else:
-                            final_msg = {
-                                "role": "user",
-                                "content": self._state_to_description(
-                                    next_state, env_info["grid"]
-                                )
-                                + "\n\nGame over! You fell into a hole.",
-                            }
-                        state["messages"].append(final_msg)
-                        # Estimate tokens for final message
-                        state["completion_mask"].extend([0] * 50)
-                        state["completion_ids"].extend(
-                            [self.processing_class.pad_token_id] * 50
-                        )
+                            state["episode_outcome"] = "fell_in_hole"
+                        # Don't add any final message
                     else:
                         # Continue episode
                         env_msg = {
@@ -503,6 +468,7 @@ The first digit in your message will be considered as your move."""
                     # Error in gym step
                     state["completed"] = True
                     env_info["done"] = True
+                    state["episode_outcome"] = "error"
                     raise RuntimeError(
                         f"Error executing action in gym environment: {str(e)}"
                     )
@@ -584,14 +550,19 @@ The first digit in your message will be considered as your move."""
             completion_ids = env_result["ids"]
             completion_messages = env_result["messages"]
             completion_mask = env_result["mask"]
+            episode_outcomes = env_result.get(
+                "episode_outcomes", [None] * len(all_prompts)
+            )
         else:
             completion_ids = [None] * len(all_prompts)
             completion_messages = [None] * len(all_prompts)
             completion_mask = [None] * len(all_prompts)
+            episode_outcomes = [None] * len(all_prompts)
 
         completion_ids = broadcast_object_list(completion_ids, from_process=0)
         completion_messages = broadcast_object_list(completion_messages, from_process=0)
         completion_mask = broadcast_object_list(completion_mask, from_process=0)
+        episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
 
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
@@ -601,6 +572,7 @@ The first digit in your message will be considered as your move."""
         completion_ids = completion_ids[process_slice]
         completion_messages = completion_messages[process_slice]
         completion_mask = completion_mask[process_slice]
+        episode_outcomes = episode_outcomes[process_slice]
 
         # Pad completions
         completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
@@ -653,6 +625,8 @@ The first digit in your message will be considered as your move."""
         for i, reward_func in enumerate(self.reward_funcs):
             keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
             reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
+            # Add episode outcomes to reward kwargs
+            reward_kwargs["episode_outcomes"] = episode_outcomes
             output_reward_func = reward_func(
                 prompts=prompts, completions=completions, **reward_kwargs
             )
