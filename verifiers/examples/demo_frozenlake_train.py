@@ -1,6 +1,8 @@
 from trl import GRPOConfig
+from transformers import AutoTokenizer
 
-import verifiers as vf
+# Import our new trainer
+from verifiers.trainers.grpo_frozenlake_trainer import GRPOFrozenLakeTrainer
 
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -18,17 +20,21 @@ CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num-processes 2 --config-file confi
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
-BATCH_SIZE = 4      # Reduced from 16 for initial testing
+BATCH_SIZE = 4  # Reduced from 16 for initial testing
+N_INITIAL_SAMPLES = 100  # Number of initial states in dataset
+FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
+GAME_REWARD_WEIGHT = 10.0  # Weight for reaching the goal
+MAX_EPISODE_STEPS = 50  # Maximum steps per episode
 
-# Create FrozenLake environment with configuration
-vf_env = vf.FrozenLakeEnv(is_slippery=IS_SLIPPERY)
-print(f"FrozenLake Environment (slippery={IS_SLIPPERY})")
-print("System prompt:")
-print(vf_env.system_prompt)
-print(f"\nDataset size: {len(vf_env.dataset)}")
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-model, tokenizer = vf.get_model_and_tokenizer(model_name)
-run_name = f"demo-frozenlake-{'slippery' if IS_SLIPPERY else 'normal'}-grpo_" + model_name.split("/")[-1].lower()
+run_name = (
+    f"demo-frozenlake-{'slippery' if IS_SLIPPERY else 'normal'}-grpo_"
+    + model_name.split("/")[-1].lower()
+)
 
 training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
@@ -41,7 +47,7 @@ training_args = GRPOConfig(
     bf16=True,
     max_grad_norm=0.1,
     num_iterations=1,
-    beta=0,
+    beta=0.1,  # KL penalty coefficient
     max_prompt_length=512,
     max_completion_length=1536,
     per_device_train_batch_size=BATCH_SIZE,
@@ -56,15 +62,30 @@ training_args = GRPOConfig(
     log_on_each_node=False,
     log_completions=True,
     report_to="wandb",
-    reward_weights=vf_env.get_reward_weights()
 )
 
-trainer = vf.GRPOEnvTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=vf_env.get_reward_funcs(),
-    env=vf_env,
+# Create and run trainer
+trainer = GRPOFrozenLakeTrainer(
+    model=model_name,
     args=training_args,
-    train_dataset=vf_env.get_dataset()
+    processing_class=tokenizer,
+    is_slippery=IS_SLIPPERY,
+    map_name="4x4",
+    n_initial_samples=N_INITIAL_SAMPLES,
+    format_reward_weight=FORMAT_REWARD_WEIGHT,
+    game_reward_weight=GAME_REWARD_WEIGHT,
+    max_episode_steps=MAX_EPISODE_STEPS,
 )
-trainer.train() 
+
+print(f"Starting FrozenLake GRPO training (slippery={IS_SLIPPERY})")
+print(f"Model: {model_name}")
+print(f"Dataset size: {N_INITIAL_SAMPLES} initial states")
+print(
+    f"Batch size: {BATCH_SIZE}, Generations per prompt: {training_args.num_generations}"
+)
+print(f"Reward weights - Format: {FORMAT_REWARD_WEIGHT}, Game: {GAME_REWARD_WEIGHT}")
+
+trainer.train()
+
+# Save the final model
+trainer.save_model(f"outputs/{run_name}/final_model")
