@@ -111,6 +111,7 @@ Possible moves are:
 3: UP
 
 
+You can think before you answer.
 Put your final answer in \\boxed{}, for example \\boxed{0} for UP, \\boxed{1} for RIGHT, etc."""
 
         # Store gym environments indexed by a unique ID
