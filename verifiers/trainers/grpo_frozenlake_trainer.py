@@ -36,6 +36,15 @@ if is_wandb_available():
 
 # Add gymnasium import
 import gymnasium as gym
+from gymnasium.envs.toy_text.frozen_lake import generate_random_map
+import numpy as np
+
+# Grid distribution configuration
+DEFAULT_GRID_DISTRIBUTION = {
+    2: 1 / 3,  # 2x2 grids: 33.3%
+    3: 1 / 3,  # 3x3 grids: 33.3%
+    4: 1 / 3,  # 4x4 grids: 33.3%
+}
 
 
 # torch.nanstd doesn't exist, so we define it here
@@ -59,6 +68,20 @@ def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(variance)
 
 
+def generate_random_frozenlake_map(size: int, p: float = 0.8) -> List[str]:
+    """
+    Generate a random FrozenLake map of specified size.
+
+    Args:
+        size: Size of the grid (e.g., 2 for 2x2, 3 for 3x3, etc.)
+        p: Probability of a frozen tile (vs hole)
+
+    Returns:
+        List of strings representing the map
+    """
+    return generate_random_map(size=size, p=p)
+
+
 class GRPOFrozenLakeTrainer(GRPOTrainer):
     """
     A GRPO trainer specifically for FrozenLake environment.
@@ -77,11 +100,12 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         peft_config: Optional["PeftConfig"] = None,
         # FrozenLake specific parameters
         is_slippery: bool = False,
-        map_name: str = "4x4",
+        grid_distribution: Optional[Dict[int, float]] = None,
         n_initial_samples: int = 100,
         format_reward_weight: float = 1.0,
         game_reward_weight: float = 10.0,
         max_episode_steps: int = 50,
+        frozen_tile_probability: float = 0.8,
         **kwargs,
     ):
         if not args.use_vllm:  # type: ignore
@@ -89,10 +113,18 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
 
         # FrozenLake configuration
         self.is_slippery = is_slippery
-        self.map_name = map_name
+        self.grid_distribution = grid_distribution or DEFAULT_GRID_DISTRIBUTION
         self.format_reward_weight = format_reward_weight
         self.game_reward_weight = game_reward_weight
         self.max_episode_steps = max_episode_steps
+        self.frozen_tile_probability = frozen_tile_probability
+
+        # Validate grid distribution
+        total_prob = sum(self.grid_distribution.values())
+        if abs(total_prob - 1.0) > 1e-6:
+            raise ValueError(
+                f"Grid distribution probabilities must sum to 1.0, got {total_prob}"
+            )
 
         # Define system prompt
         self.system_prompt = """You are playing a game called frozen lake. 
@@ -168,34 +200,48 @@ I need to analyze the current state and find the best path to the goal while avo
             spaces_between_special_tokens=False,
         )
 
+    def _sample_grid_size(self) -> int:
+        """Sample a grid size based on the grid distribution."""
+        sizes = list(self.grid_distribution.keys())
+        probabilities = list(self.grid_distribution.values())
+        return np.random.choice(sizes, p=probabilities)
+
     def _create_initial_dataset(self, n_samples: int) -> Dataset:
         """Create a dataset with initial FrozenLake states."""
         data = []
         for i in range(n_samples):
-            # Initial state description
-            initial_prompt = self._get_initial_state_description()
+            # Sample a grid size
+            grid_size = self._sample_grid_size()
+
+            # Generate a random map for this size
+            map_desc = generate_random_frozenlake_map(
+                size=grid_size, p=self.frozen_tile_probability
+            )
+
+            # Get initial state description
+            initial_prompt = self._get_initial_state_description_from_map(map_desc)
+
             # Add system prompt and initial state
             messages = []
             if self.system_prompt:
                 messages.append({"role": "system", "content": self.system_prompt})
             messages.append({"role": "user", "content": initial_prompt})
 
-            data.append({"prompt": messages})
+            data.append(
+                {
+                    "prompt": messages,
+                    "map_desc": map_desc,  # Store the map description for later use
+                    "grid_size": grid_size,
+                }
+            )
         return Dataset.from_list(data)
 
-    def _get_initial_state_description(self) -> str:
-        """Get description of initial state."""
-        # Create a temporary env to get the grid layout
-        temp_env = gym.make(
-            "FrozenLake-v1",
-            desc=None,
-            map_name=self.map_name,
-            is_slippery=self.is_slippery,
-        )
-        grid = self._get_grid_from_env(temp_env)
-        temp_env.close()
+    def _get_initial_state_description_from_map(self, map_desc: List[str]) -> str:
+        """Get description of initial state from a map description."""
+        # Convert map description to grid
+        grid = [list(row) for row in map_desc]
 
-        # Agent starts at position 0 (top-left)
+        # Agent starts at position 0 (top-left) which should be 'S'
         return self._state_to_description(0, grid)
 
     def _get_grid_from_env(self, env: gym.Env) -> List[List[str]]:
@@ -318,23 +364,35 @@ I need to analyze the current state and find the best path to the goal while avo
         prompts: List[List[Dict[str, Any]]],
         llm: LLM | VLLMClient,
         sampling_params: SamplingParams,
+        map_descs: Optional[List[List[str]]] = None,
         **kwargs: Any,
     ) -> Dict[str, List[Sequence[int]] | List[str] | List[List[Dict[str, Any]]]]:
         """Generate multi-turn FrozenLake episodes."""
 
         # Initialize states
         states = []
-        for m in prompts:
+        for i, m in enumerate(prompts):
             env_id = self._next_env_id
             self._next_env_id += 1
 
-            # Create new gym environment
-            gym_env = gym.make(
-                "FrozenLake-v1",
-                desc=None,
-                map_name=self.map_name,
-                is_slippery=self.is_slippery,
-            )
+            # Create new gym environment with custom map if provided
+            if map_descs and i < len(map_descs):
+                gym_env = gym.make(
+                    "FrozenLake-v1",
+                    desc=map_descs[i],
+                    map_name=None,
+                    is_slippery=self.is_slippery,
+                )
+            else:
+                # Fallback to random 4x4 map
+                gym_env = gym.make(
+                    "FrozenLake-v1",
+                    desc=generate_random_frozenlake_map(
+                        4, self.frozen_tile_probability
+                    ),
+                    map_name=None,
+                    is_slippery=self.is_slippery,
+                )
             initial_state, _ = gym_env.reset()
             grid = self._get_grid_from_env(gym_env)
 
@@ -580,11 +638,18 @@ I need to analyze the current state and find the best path to the goal while avo
 
         # Gather prompts for multi-turn generation
         all_prompts = gather_object(prompts)
+        # Extract map descriptions if available
+        map_descs = (
+            [x.get("map_desc") for x in inputs] if "map_desc" in inputs[0] else None
+        )
+        all_map_descs = gather_object(map_descs) if map_descs else None
+
         if self.accelerator.is_main_process:
             env_result = self.generate_multiturn(
                 prompts=all_prompts,
                 llm=self.vllm_client,
                 sampling_params=self.sampling_params,
+                map_descs=all_map_descs,
             )
             completion_ids = env_result["ids"]
             completion_messages = env_result["messages"]
