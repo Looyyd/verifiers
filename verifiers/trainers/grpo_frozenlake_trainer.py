@@ -93,9 +93,6 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         self.game_reward_weight = game_reward_weight
         self.max_episode_steps = max_episode_steps
 
-        # Create initial dataset
-        train_dataset = self._create_initial_dataset(n_initial_samples)
-
         # Define system prompt
         self.system_prompt = """You are an agent playing frozen lake.
 You will be given grids by the user, propose the best move.
@@ -107,9 +104,6 @@ Possible moves are:
 
 The first digit in your message will be considered as your move."""
 
-        # Define reward functions
-        reward_funcs = [self._format_reward_func, self._game_reward_func]
-
         # Store gym environments indexed by a unique ID
         self._gym_envs = {}
         self._next_env_id = 0
@@ -118,6 +112,12 @@ The first digit in your message will be considered as your move."""
         self.max_workers = kwargs.pop("max_workers", 10)
         self.sleep_time = kwargs.pop("sleep_time", 0.01)
         self.scale_rewards = kwargs.pop("scale_rewards", True)
+
+        # Create initial dataset (after system_prompt is defined)
+        train_dataset = self._create_initial_dataset(n_initial_samples)
+
+        # Define reward functions
+        reward_funcs = [self._format_reward_func, self._game_reward_func]
 
         # Call parent constructor
         super().__init__(
