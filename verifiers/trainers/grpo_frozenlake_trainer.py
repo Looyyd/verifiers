@@ -96,13 +96,22 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         # Define system prompt
         self.system_prompt = """You are an agent playing frozen lake.
 You will be given grids by the user, propose the best move.
+
+The Legend is:
+A: Agent
+S: Start
+F: Frozen
+H: Hole
+G: Goal
+
 Possible moves are:
 0: UP
 1: RIGHT
 2: DOWN
 3: LEFT
 
-The first digit in your message will be considered as your move."""
+
+Put your final answer in \\boxed{}, for example \\boxed{0} for UP, \\boxed{1} for RIGHT, etc."""
 
         # Store gym environments indexed by a unique ID
         self._gym_envs = {}
@@ -204,19 +213,25 @@ The first digit in your message will be considered as your move."""
         for grid_row in display_grid:
             grid_str += " ".join(grid_row) + "\n"
 
-        # Add legend
-        grid_str += "\nLegend: A=Agent, S=Start, F=Frozen, H=Hole, G=Goal"
         return grid_str
 
     def _parse_action(self, message: str) -> Optional[int]:
-        """Parse action from assistant message."""
+        """Parse action from assistant message in \\boxed{} format."""
         if len(message) == 0:
             return None
 
-        # Find the first digit in the message
-        for char in message:
-            if char.isdigit() and char in "0123":
-                return int(char)
+        # Look for \boxed{X} pattern where X is a digit 0-3
+        import re
+
+        pattern = r"\\boxed\{(\d)\}"
+        matches = re.findall(pattern, message)
+
+        if matches:
+            # Take the last match in case there are multiple
+            digit = matches[-1]
+            if digit in "0123":
+                return int(digit)
+
         return None
 
     def _format_reward_func(
