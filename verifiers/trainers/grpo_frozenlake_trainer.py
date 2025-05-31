@@ -41,9 +41,9 @@ import numpy as np
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
-    2: 1 / 3,  # 2x2 grids: 33.3%
-    3: 1 / 3,  # 3x3 grids: 33.3%
-    4: 1 / 3,  # 4x4 grids: 33.3%
+    2: 0.2,  # 2x2 grids: 33.3%
+    3: 0.3,  # 3x3 grids: 33.3%
+    4: 0.5,  # 4x4 grids: 33.3%
 }
 
 
