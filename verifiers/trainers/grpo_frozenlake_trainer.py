@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import random
 import time
 import re
+import pandas as pd
 
 from accelerate.utils import broadcast_object_list, gather, gather_object
 from datasets import Dataset
@@ -20,6 +21,8 @@ from transformers import (
 from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.imports import LLM, SamplingParams
 from verifiers.inference.vllm_client import VLLMClient
+from verifiers.envs.multiturn_env import dict_to_chat_response
+
 
 # monkey patch vllm client
 import trl.extras.vllm_client
@@ -277,8 +280,6 @@ I need to analyze the current state and find the best path to the goal while avo
             return None
 
         # Look for \boxed{X} pattern where X is a digit 0-3
-        import re
-
         pattern = r"\\boxed\{(\d)\}"
         matches = re.findall(pattern, message)
 
@@ -471,8 +472,6 @@ I need to analyze the current state and find the best path to the goal while avo
                 spaces_between_special_tokens=sampling_params.spaces_between_special_tokens,
             )
             # Convert response format if needed
-            from verifiers.envs.multiturn_env import dict_to_chat_response
-
             llm_responses = dict_to_chat_response(llm_responses).responses
         else:
             llm_responses = llm.chat(
@@ -810,7 +809,6 @@ I need to analyze the current state and find the best path to the goal while avo
                     and "wandb" in self.args.report_to
                     and wandb.run is not None
                 ):
-                    import pandas as pd
 
                     table = {
                         "step": [str(self.state.global_step)] * len(rewards),
