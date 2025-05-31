@@ -49,16 +49,27 @@ run_name = (
 training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
+    # Trying to save vram with 8bit optimizer, TODO: remove if unstable training
+    optim="paged_adamw_8bit",
     learning_rate=1e-6,
     lr_scheduler_type="constant",
     num_train_epochs=1,
-    temperature=1.0,
+    # Config recommended for Qwen 3 thinking, it's probably a good default for thinking tasks
+    # TODO: this is also defined in the sampling_params in the trainer, need to unify them, not sure which is actually used
+    temperature=0.6,
+    top_p=0.95,
+    top_k=20,
+    min_p=0.0,
     max_steps=1000,
     bf16=True,
     max_grad_norm=0.1,
     num_iterations=1,
-    beta=0.1,  # KL penalty coefficient
+    # KL penalty coefficient, default is 0.04, other demos in this repo use lower kl,
+    # some people online used smaller kl also https://x.com/abacaj/status/1886497011618197748
+    # TODO: figure out if this works well
+    beta=0.001,
     max_prompt_length=512,
+    # TODO: need to increase this for multi step reasoning. or implement a method to contract the prompt length.
     max_completion_length=1536,
     per_device_train_batch_size=BATCH_SIZE,
     num_generations=16,
@@ -72,6 +83,11 @@ training_args = GRPOConfig(
     log_on_each_node=False,
     log_completions=True,
     report_to="wandb",
+    # Dr GRPO
+    scale_rewards=False,
+    loss_type="dr_grpo",
+    # DAPO paper, epsilon_high=0.28 seems the most useful contribution
+    epsilon_high=0.28,
 )
 
 # Create and run trainer
