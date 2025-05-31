@@ -4,7 +4,6 @@ from transformers import AutoTokenizer
 # Import our new trainer
 from verifiers.trainers.grpo_frozenlake_trainer import GRPOFrozenLakeTrainer
 
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 """
 2-GPU training (single node, 1 training + 1 inference)
@@ -16,7 +15,18 @@ CUDA_VISIBLE_DEVICES=1 accelerate launch --num-processes 1 --config-file configs
 
 CUDA_VISIBLE_DEVICES=0,1 python verifiers/inference/vllm_serve.py --model 'Qwen/Qwen2.5-1.5B-Instruct' --max_model_len 4096 --dtype bfloat16 --gpu_memory_utilization 0.95 --enable_prefix_caching True
 CUDA_VISIBLE_DEVICES=2,3 accelerate launch --num-processes 2 --config-file configs/zero3.yaml verifiers/examples/demo_frozenlake_train.py
+---
+8-GPU training (single node, 4 training + 4 inference)
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python verifiers/inference/vllm_serve.py --model  'Qwen/Qwen2.5-7B-Instruct' \
+    --tensor_parallel_size 4 --max_model_len 8192 --dtype bfloat16 \
+    --gpu_memory_utilization 0.9 --enable_prefix_caching True \
+    --host 0.0.0.0 --port 8000
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file configs/zero3.yaml verifiers/examples/demo_frozenlake_train.py
 """
+
+model_name = "Qwen/Qwen2.5-7B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
