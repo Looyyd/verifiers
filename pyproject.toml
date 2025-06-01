@@ -17,7 +17,7 @@ dependencies = [
     "wandb",
     "rich",
     "duckduckgo-search",
-    "trl==0.17",
+    "trl==0.18.1",
     "liger-kernel",
     "brave-search",
     "latex2sympy>=1.0.3",
