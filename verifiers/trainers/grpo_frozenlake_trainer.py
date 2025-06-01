@@ -50,6 +50,36 @@ DEFAULT_GRID_DISTRIBUTION = {
 }
 
 
+def nanmin(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the minimum value of a tensor, ignoring NaNs. This function only supports 1D tensors.
+
+    Args:
+        tensor (`torch.Tensor`): Input tensor of shape `(N,)`.
+
+    Returns:
+        `torch.Tensor`: Minimum value of the tensor, ignoring NaNs. Returns NaN if all values are NaN.
+    """
+    if torch.isnan(tensor).all():
+        return torch.tensor(float("nan"), dtype=tensor.dtype, device=tensor.device)
+    return torch.min(tensor[~torch.isnan(tensor)])
+
+
+def nanmax(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the maximum value of a tensor, ignoring NaNs. This function only supports 1D tensors.
+
+    Args:
+        tensor (`torch.Tensor`): Input tensor of shape `(N,)`.
+
+    Returns:
+        `torch.Tensor`: Maximum value of the tensor, ignoring NaNs. Returns NaN if all values are NaN.
+    """
+    if torch.isnan(tensor).all():
+        return torch.tensor(float("nan"), dtype=tensor.dtype, device=tensor.device)
+    return torch.max(tensor[~torch.isnan(tensor)])
+
+
 # torch.nanstd doesn't exist, so we define it here
 def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -89,6 +119,41 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
     """
     A GRPO trainer specifically for FrozenLake environment.
     Inherits directly from GRPOTrainer to allow custom modifications.
+
+    This trainer extends GRPOTrainer with:
+    - Multi-turn FrozenLake environment interaction
+    - Custom reward functions for format compliance and game success
+    - Optional context compression for long episodes
+
+    Context Compression:
+    When enabled, the trainer will prompt the model to summarize the conversation
+    when it reaches a token threshold. This allows for training on longer episodes
+    without exceeding context limits. The model learns to generate effective
+    summaries that preserve important information.
+
+    Example usage with context compression:
+
+    ```python
+    trainer = GRPOFrozenLakeTrainer(
+        model="your-model",
+        args=GRPOConfig(
+            # ... other args ...
+            max_completion_length=1024,  # Max tokens before compression
+        ),
+        # Enable context compression
+        use_context_compression=True,
+        compression_threshold=0.8,  # Compress at 80% of max_completion_length
+        compression_prompt_template=(
+            "This conversation is getting long. Sum up this conversation so far "
+            "and the summary will be given to your next instance to continue the task. "
+            "You can use <think> tags to organize your thoughts. "
+            "The content after </think> will be given to your next instance."
+        ),
+        # Other FrozenLake parameters
+        is_slippery=False,
+        max_episode_steps=50,
+    )
+    ```
     """
 
     def __init__(
@@ -109,6 +174,14 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         game_reward_weight: float = 10.0,
         max_episode_steps: int = 50,
         frozen_tile_probability: float = 0.8,
+        # Context compression parameters
+        use_context_compression: bool = False,
+        compression_threshold: float = 0.8,
+        compression_prompt_template: str = (
+            "This conversation is getting long. Sum up this conversation so far and the summary "
+            "will be given to your next instance to continue the task. You can use <think> tags "
+            "to organize your thoughts. The content after </think> will be given to your next instance."
+        ),
         **kwargs,
     ):
         if not args.use_vllm:  # type: ignore
@@ -121,6 +194,22 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         self.game_reward_weight = game_reward_weight
         self.max_episode_steps = max_episode_steps
         self.frozen_tile_probability = frozen_tile_probability
+
+        # Context compression configuration
+        self.use_context_compression = use_context_compression
+        self.compression_threshold = compression_threshold
+        self.compression_prompt_template = compression_prompt_template
+
+        # Validate compression parameters
+        if self.use_context_compression:
+            if not (0.0 < self.compression_threshold <= 1.0):
+                raise ValueError(
+                    f"compression_threshold must be between 0 and 1, got {self.compression_threshold}"
+                )
+            if not self.compression_prompt_template:
+                raise ValueError(
+                    "compression_prompt_template cannot be empty when using context compression"
+                )
 
         # Validate grid distribution
         total_prob = sum(self.grid_distribution.values())
@@ -189,6 +278,12 @@ I need to analyze the current state and find the best path to the goal while avo
         # Set reward weights after init
         self.reward_weights = torch.tensor(
             [self.format_reward_weight, self.game_reward_weight]
+        )
+
+        # Initialize parent class attributes we use in _compute_loss
+        self.epsilon_low = args.epsilon
+        self.epsilon_high = (
+            args.epsilon_high if args.epsilon_high is not None else args.epsilon
         )
 
         self.sampling_params = SamplingParams(
@@ -301,9 +396,12 @@ I need to analyze the current state and find the best path to the goal while avo
         rewards = []
         # Get episode outcomes from kwargs if available
         episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
+        compression_info = kwargs.get("compression_info", [{}] * len(completions))
 
         for i, completion in enumerate(completions):
             outcome = episode_outcomes[i]
+            comp_info = compression_info[i]
+
             if outcome == "invalid_action":
                 rewards.append(-0.1)
                 continue
@@ -332,15 +430,23 @@ I need to analyze the current state and find the best path to the goal while avo
             # +0.1 if has valid boxed answer
             # 0.0 baseline for valid format
             # -0.1 for invalid action (handled above)
+            # Additional penalty for compression without think tags
 
+            base_reward = 0.0
             if has_thinking and has_valid_answer:
-                rewards.append(0.2)  # Full credit for perfect format
+                base_reward = 0.2  # Full credit for perfect format
             elif has_valid_answer:
-                rewards.append(0.1)  # Partial credit for answer without thinking
+                base_reward = 0.1  # Partial credit for answer without thinking
             elif has_thinking:
-                rewards.append(0.05)  # Small credit for thinking without valid answer
+                base_reward = 0.05  # Small credit for thinking without valid answer
             else:
-                rewards.append(0.0)  # No bonus for poor format
+                base_reward = 0.0  # No bonus for poor format
+
+            # Apply penalty if this was a compression response without think tags
+            # (This information would need to be passed through the episode data)
+            # For now, we'll skip this as it would require modifying the data flow
+
+            rewards.append(base_reward)
 
         return rewards
 
@@ -354,9 +460,17 @@ I need to analyze the current state and find the best path to the goal while avo
         rewards = []
         # Get episode outcomes from kwargs if available
         episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
+        compression_info = kwargs.get("compression_info", [{}] * len(completions))
 
-        for outcome in episode_outcomes:
-            rewards.append(1.0 if outcome == "goal_reached" else 0.0)
+        for outcome, comp_info in zip(episode_outcomes, compression_info):
+            base_reward = 1.0 if outcome == "goal_reached" else 0.0
+
+            # Optional: small penalty for needing compression (can be disabled by setting to 1.0)
+            compression_penalty = 1.0  # 5% penalty for needing compression
+            if comp_info.get("needed_compression", False) and compression_penalty < 1.0:
+                base_reward *= compression_penalty
+
+            rewards.append(base_reward)
 
         return rewards
 
@@ -414,6 +528,13 @@ I need to analyze the current state and find the best path to the goal while avo
                 "gym_env_id": env_id,
                 "steps": 0,
                 "episode_outcome": None,  # Track outcome for reward functions
+                # Context compression tracking
+                "is_compressing": False,
+                "has_been_compressed": False,
+                "compression_count": 0,
+                # Track conversation segments for proper loss computation
+                "conversation_segments": [],
+                "current_segment_start": 0,  # Track where current segment starts in completion_ids
             }
             states.append(state)
 
@@ -425,24 +546,105 @@ I need to analyze the current state and find the best path to the goal while avo
             states = self.step_frozenlake(states, llm, sampling_params)
             all_completed = all(state["completed"] for state in states)
 
-        # Extract results
-        completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
-        completion_ids = [s["completion_ids"] for s in states]
-        completion_mask = [s["completion_mask"] for s in states]
-        episode_outcomes = [s["episode_outcome"] for s in states]
+        # Ensure we capture final segments before cleanup
+        if self.use_context_compression:
+            for state in states:
+                if state["conversation_segments"] and state[
+                    "current_segment_start"
+                ] < len(state["completion_ids"]):
+                    # Add the final segment
+                    segment_completion_ids = state["completion_ids"][
+                        state["current_segment_start"] :
+                    ]
+                    segment_completion_mask = state["completion_mask"][
+                        state["current_segment_start"] :
+                    ]
 
-        # Clean up environments
-        for env_info in self._gym_envs.values():
-            if "env" in env_info:
-                env_info["env"].close()
-        self._gym_envs.clear()
+                    if segment_completion_ids:  # Only add if there are tokens
+                        state["conversation_segments"].append(
+                            {
+                                "prompt_ids": state["prompt_ids"],
+                                "completion_ids": segment_completion_ids,
+                                "completion_mask": segment_completion_mask,
+                            }
+                        )
 
-        return {
-            "ids": completion_ids,
-            "messages": completion_messages,
-            "mask": completion_mask,
-            "episode_outcomes": episode_outcomes,
-        }
+        # Extract results with conversation segments
+        if self.use_context_compression:
+            # Return arrays of segments for each episode
+            all_prompt_ids = []
+            all_prompt_masks = []
+            all_completion_ids = []
+            all_completion_masks = []
+
+            for state in states:
+                # Extract segments
+                episode_prompt_ids = []
+                episode_prompt_masks = []
+                episode_completion_ids = []
+                episode_completion_masks = []
+
+                for segment in state["conversation_segments"]:
+                    episode_prompt_ids.append(segment["prompt_ids"])
+                    episode_completion_ids.append(segment["completion_ids"])
+                    episode_completion_masks.append(segment["completion_mask"])
+                    # Create prompt mask of all 1s
+                    episode_prompt_masks.append([1] * len(segment["prompt_ids"]))
+
+                all_prompt_ids.append(episode_prompt_ids)
+                all_prompt_masks.append(episode_prompt_masks)
+                all_completion_ids.append(episode_completion_ids)
+                all_completion_masks.append(episode_completion_masks)
+
+            completion_messages = [
+                s["messages"][s["prompt_messages"] :] for s in states
+            ]
+            episode_outcomes = [s["episode_outcome"] for s in states]
+            compression_info = [
+                {
+                    "needed_compression": s.get("has_been_compressed", False),
+                    "compression_count": s.get("compression_count", 0),
+                }
+                for s in states
+            ]
+
+            # Clean up environments
+            for env_info in self._gym_envs.values():
+                if "env" in env_info:
+                    env_info["env"].close()
+            self._gym_envs.clear()
+
+            return {
+                "prompt_ids": all_prompt_ids,
+                "prompt_masks": all_prompt_masks,
+                "completion_ids": all_completion_ids,
+                "completion_masks": all_completion_masks,
+                "messages": completion_messages,
+                "episode_outcomes": episode_outcomes,
+                "compression_info": compression_info,
+                "use_segments": True,  # Flag to indicate segmented data
+            }
+        else:
+            # Original non-compression path
+            completion_messages = [
+                s["messages"][s["prompt_messages"] :] for s in states
+            ]
+            completion_ids = [s["completion_ids"] for s in states]
+            completion_mask = [s["completion_mask"] for s in states]
+            episode_outcomes = [s["episode_outcome"] for s in states]
+
+            # Clean up environments
+            for env_info in self._gym_envs.values():
+                if "env" in env_info:
+                    env_info["env"].close()
+            self._gym_envs.clear()
+
+            return {
+                "ids": completion_ids,
+                "messages": completion_messages,
+                "mask": completion_mask,
+                "episode_outcomes": episode_outcomes,
+            }
 
     def step_frozenlake(
         self,
@@ -483,6 +685,8 @@ I need to analyze the current state and find the best path to the goal while avo
             time.sleep(self.sleep_time * random.random())
 
             state = deepcopy(states[j])
+
+            # Initialize prompt_ids on first call
             if len(state["prompt_ids"]) == 0:
                 state["prompt_ids"] = llm_response.prompt_token_ids
 
@@ -493,12 +697,12 @@ I need to analyze the current state and find the best path to the goal while avo
             }
             state["messages"].append(assistant_msg)
 
-            # Update token tracking
+            # Update token tracking - APPEND, don't overwrite
             total_prev_len = len(state["prompt_ids"]) + len(state["completion_ids"])
             env_response_len = len(list(llm_response.prompt_token_ids)) - total_prev_len
             new_completion_len = len(llm_response.outputs[0].token_ids)
 
-            # Update completion masks
+            # Extend completion masks
             state["completion_mask"].extend(
                 [0] * env_response_len
             )  # Environment tokens masked
@@ -506,12 +710,82 @@ I need to analyze the current state and find the best path to the goal while avo
                 [1] * new_completion_len
             )  # Assistant tokens not masked
 
-            # Update completion ids
-            state["completion_ids"] = list(llm_response.prompt_token_ids)
-            state["completion_ids"].extend(list(llm_response.outputs[0].token_ids))
-            state["completion_ids"] = state["completion_ids"][
-                len(state["prompt_ids"]) :
-            ]
+            # Extend completion ids - don't overwrite!
+            new_tokens = list(llm_response.prompt_token_ids)[total_prev_len:]
+            new_tokens.extend(list(llm_response.outputs[0].token_ids))
+            state["completion_ids"].extend(new_tokens)
+
+            # Handle compression response
+            if state.get("is_compressing", False):
+                # Extract summary (after </think> if present)
+                summary_text = assistant_msg["content"]
+
+                # Check if the model used think tags
+                has_think_tags = "</think>" in summary_text
+                if has_think_tags:
+                    # Extract content after </think>
+                    summary_text = summary_text.split("</think>", 1)[1].strip()
+                else:
+                    # Empty summary if no think tags
+                    # Optionally, we could add a small penalty for not using think tags
+                    # This could be tracked and used in the format reward function
+                    state["compression_missing_think"] = True
+                    summary_text = ""
+
+                # Ensure we have some summary text
+                if not summary_text.strip():
+                    # Fallback to a minimal summary if empty
+                    summary_text = "Previous conversation summary unavailable."
+
+                # Save current segment before compression
+                segment_completion_ids = state["completion_ids"][
+                    state["current_segment_start"] :
+                ]
+                segment_completion_mask = state["completion_mask"][
+                    state["current_segment_start"] :
+                ]
+
+                state["conversation_segments"].append(
+                    {
+                        "prompt_ids": state["prompt_ids"],
+                        "completion_ids": segment_completion_ids,
+                        "completion_mask": segment_completion_mask,
+                    }
+                )
+
+                # Get current game state
+                env_info = self._gym_envs[state["gym_env_id"]]
+                current_state_desc = self._state_to_description(
+                    env_info["state"], env_info["grid"]
+                )
+
+                # Build new compressed user message
+                compressed_user_msg = (
+                    f"{current_state_desc}\n\n"
+                    f"Here is a message from a previous instance about the events in this task so far:\n"
+                    f"<message>{summary_text}</message>"
+                )
+
+                # Reset messages but keep system prompt
+                new_messages = []
+                if state["messages"][0]["role"] == "system":
+                    new_messages.append(state["messages"][0])
+                new_messages.append({"role": "user", "content": compressed_user_msg})
+
+                # Update state for new segment
+                state["messages"] = new_messages
+                state["is_compressing"] = False
+                state["has_been_compressed"] = True
+                state["compression_count"] += 1
+                state["current_segment_start"] = len(
+                    state["completion_ids"]
+                )  # Mark start of new segment
+
+                # Reset prompt_ids for the new segment
+                state["prompt_ids"] = []  # Will be set on next LLM call
+
+                # Don't increment steps for compression
+                return j, state
 
             # Parse action and execute gym step
             env_id = state["gym_env_id"]
@@ -524,7 +798,6 @@ I need to analyze the current state and find the best path to the goal while avo
                 env_info["done"] = True
                 state["completed"] = True
                 state["episode_outcome"] = "invalid_action"
-                # Don't add any message - just mark as completed
             else:
                 # Execute action in gym
                 gym_env = env_info["env"]
@@ -541,22 +814,40 @@ I need to analyze the current state and find the best path to the goal while avo
                     if done:
                         # Episode completed
                         state["completed"] = True
-                        # Track outcome without adding messages
                         if reward > 0:
                             state["episode_outcome"] = "goal_reached"
                         else:
                             state["episode_outcome"] = "fell_in_hole"
-                        # Don't add any final message
                     else:
-                        # Continue episode
-                        env_msg = {
-                            "role": "user",
-                            "content": self._state_to_description(
-                                next_state, env_info["grid"]
-                            ),
-                        }
-                        state["messages"].append(env_msg)
-                        # Don't update masks here - will be handled in next iteration
+                        # Check if we need compression
+                        current_segment_length = (
+                            len(state["completion_ids"])
+                            - state["current_segment_start"]
+                        )
+                        if (
+                            self.use_context_compression
+                            and current_segment_length
+                            >= self.compression_threshold * self.max_completion_length
+                            and state["compression_count"] < 3
+                        ):  # Limit compressions to avoid infinite loops
+
+                            # Add compression prompt
+                            state["messages"].append(
+                                {
+                                    "role": "user",
+                                    "content": self.compression_prompt_template,
+                                }
+                            )
+                            state["is_compressing"] = True
+                        else:
+                            # Continue episode - add next state
+                            env_msg = {
+                                "role": "user",
+                                "content": self._state_to_description(
+                                    next_state, env_info["grid"]
+                                ),
+                            }
+                            state["messages"].append(env_msg)
 
                 except Exception as e:
                     # Error in gym step
@@ -573,17 +864,26 @@ I need to analyze the current state and find the best path to the goal while avo
             # Truncate if too long
             if len(state["completion_ids"]) > sampling_params.max_tokens:
                 state["completed"] = True
-                state["completion_ids"] = state["completion_ids"][
-                    : sampling_params.max_tokens
+                # Truncate only the part after current segment start
+                max_segment_tokens = (
+                    sampling_params.max_tokens - state["current_segment_start"]
+                )
+                segment_ids = state["completion_ids"][state["current_segment_start"] :][
+                    :max_segment_tokens
                 ]
-                state["completion_mask"] = state["completion_mask"][
-                    : len(state["completion_ids"])
-                ]
+                segment_mask = state["completion_mask"][
+                    state["current_segment_start"] :
+                ][:max_segment_tokens]
 
-            # Ensure mask and ids have same length
-            min_len = min(len(state["completion_mask"]), len(state["completion_ids"]))
-            state["completion_mask"] = state["completion_mask"][:min_len]
-            state["completion_ids"] = state["completion_ids"][:min_len]
+                # Update the full arrays
+                state["completion_ids"] = (
+                    state["completion_ids"][: state["current_segment_start"]]
+                    + segment_ids
+                )
+                state["completion_mask"] = (
+                    state["completion_mask"][: state["current_segment_start"]]
+                    + segment_mask
+                )
 
             return j, state
 
@@ -648,75 +948,125 @@ I need to analyze the current state and find the best path to the goal while avo
                 sampling_params=self.sampling_params,
                 map_descs=all_map_descs,
             )
-            completion_ids = env_result["ids"]
-            completion_messages = env_result["messages"]
-            completion_mask = env_result["mask"]
-            episode_outcomes = env_result.get(
-                "episode_outcomes", [None] * len(all_prompts)
-            )
-        else:
-            completion_ids = [None] * len(all_prompts)
-            completion_messages = [None] * len(all_prompts)
-            completion_mask = [None] * len(all_prompts)
-            episode_outcomes = [None] * len(all_prompts)
 
-        completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            if env_result.get("use_segments", False):
+                # Handle segmented data from context compression
+                prompt_ids_list = env_result["prompt_ids"]
+                prompt_masks_list = env_result["prompt_masks"]
+                completion_ids_list = env_result["completion_ids"]
+                completion_masks_list = env_result["completion_masks"]
+                completion_messages = env_result["messages"]
+                episode_outcomes = env_result.get(
+                    "episode_outcomes", [None] * len(all_prompts)
+                )
+                compression_info = env_result.get(
+                    "compression_info", [{}] * len(all_prompts)
+                )
+            else:
+                # Convert to list format for compatibility
+                prompt_ids_list = [
+                    [prompt_ids[i].tolist()] for i in range(len(prompts))
+                ]
+                prompt_masks_list = [
+                    [prompt_mask[i].tolist()] for i in range(len(prompts))
+                ]
+                completion_ids_list = [[ids] for ids in env_result["ids"]]
+                completion_masks_list = [[mask] for mask in env_result["mask"]]
+                completion_messages = env_result["messages"]
+                episode_outcomes = env_result.get(
+                    "episode_outcomes", [None] * len(all_prompts)
+                )
+                compression_info = [{}] * len(all_prompts)
+        else:
+            prompt_ids_list = [None] * len(all_prompts)
+            prompt_masks_list = [None] * len(all_prompts)
+            completion_ids_list = [None] * len(all_prompts)
+            completion_masks_list = [None] * len(all_prompts)
+            completion_messages = [None] * len(all_prompts)
+            episode_outcomes = [None] * len(all_prompts)
+            compression_info = [None] * len(all_prompts)
+
+        # Broadcast all data
+        prompt_ids_list = broadcast_object_list(prompt_ids_list, from_process=0)
+        prompt_masks_list = broadcast_object_list(prompt_masks_list, from_process=0)
+        completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
+        completion_masks_list = broadcast_object_list(
+            completion_masks_list, from_process=0
+        )
         completion_messages = broadcast_object_list(completion_messages, from_process=0)
-        completion_mask = broadcast_object_list(completion_mask, from_process=0)
         episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
+        compression_info = broadcast_object_list(compression_info, from_process=0)
 
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
             (self.accelerator.process_index + 1) * len(prompts),
         )
 
-        completion_ids = completion_ids[process_slice]
+        # Slice for local process
+        prompt_ids_list = prompt_ids_list[process_slice]
+        prompt_masks_list = prompt_masks_list[process_slice]
+        completion_ids_list = completion_ids_list[process_slice]
+        completion_masks_list = completion_masks_list[process_slice]
         completion_messages = completion_messages[process_slice]
-        completion_mask = completion_mask[process_slice]
         episode_outcomes = episode_outcomes[process_slice]
+        compression_info = compression_info[process_slice]
 
-        # Pad completions
-        completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-        completion_ids = pad(
-            completion_ids, padding_value=self.processing_class.pad_token_id
-        )
+        # For context compression, we need to handle old_per_token_logps differently
+        if self.use_context_compression and any(
+            len(segments) > 1 for segments in completion_ids_list
+        ):
+            # We'll compute old_per_token_logps in _compute_loss for each segment
+            old_per_token_logps = None
+            ref_per_token_logps = None
+        else:
+            # Original path for non-compression
+            # Pad and concatenate for standard processing
+            completion_ids = [
+                torch.tensor(ids[0], device=device) for ids in completion_ids_list
+            ]
+            completion_ids = pad(
+                completion_ids, padding_value=self.processing_class.pad_token_id
+            )
 
-        completion_mask = [
-            torch.tensor(mask, device=device) for mask in completion_mask
-        ]
-        completion_mask = pad(completion_mask, padding_value=0)
+            completion_mask = [
+                torch.tensor(mask[0], device=device) for mask in completion_masks_list
+            ]
+            completion_mask = pad(completion_mask, padding_value=0)
 
-        prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
 
-        logits_to_keep = completion_ids.size(1)
+            logits_to_keep = completion_ids.size(1)
 
-        # Compute logps
-        with torch.no_grad():
-            if self.num_iterations > 1:
-                old_per_token_logps = self._get_per_token_logps(
-                    self.model, prompt_completion_ids, attention_mask, logits_to_keep
-                )
-            else:
-                old_per_token_logps = None
-
-            if self.beta == 0.0:
-                ref_per_token_logps = None
-            elif self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model,
-                    prompt_completion_ids,
-                    attention_mask,
-                    logits_to_keep,
-                )
-            else:
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(
+            # Compute logps
+            with torch.no_grad():
+                if self.num_iterations > 1:
+                    old_per_token_logps = self._get_per_token_logps(
                         self.model,
                         prompt_completion_ids,
                         attention_mask,
                         logits_to_keep,
                     )
+                else:
+                    old_per_token_logps = None
+
+                if self.beta == 0.0:
+                    ref_per_token_logps = None
+                elif self.ref_model is not None:
+                    ref_per_token_logps = self._get_per_token_logps(
+                        self.ref_model,
+                        prompt_completion_ids,
+                        attention_mask,
+                        logits_to_keep,
+                    )
+                else:
+                    with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        ref_per_token_logps = self._get_per_token_logps(
+                            self.model,
+                            prompt_completion_ids,
+                            attention_mask,
+                            logits_to_keep,
+                        )
 
         # Compute rewards
         completions = completion_messages
@@ -726,8 +1076,9 @@ I need to analyze the current state and find the best path to the goal while avo
         for i, reward_func in enumerate(self.reward_funcs):
             keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
             reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
-            # Add episode outcomes to reward kwargs
+            # Add episode outcomes and compression info to reward kwargs
             reward_kwargs["episode_outcomes"] = episode_outcomes
+            reward_kwargs["compression_info"] = compression_info
             output_reward_func = reward_func(
                 prompts=prompts, completions=completions, **reward_kwargs
             )
@@ -771,8 +1122,16 @@ I need to analyze the current state and find the best path to the goal while avo
         # Log metrics
         mode = "eval" if self.control.should_evaluate else "train"
 
+        # Calculate completion length across all segments
+        total_completion_length = 0
+        for masks_list in completion_masks_list:
+            for mask in masks_list:
+                total_completion_length += sum(mask)
+
         completion_length = (
-            self.accelerator.gather_for_metrics(completion_mask.sum(1))
+            self.accelerator.gather_for_metrics(
+                torch.tensor(total_completion_length, device=device)
+            )
             .float()
             .mean()
             .item()
@@ -819,15 +1178,296 @@ I need to analyze the current state and find the best path to the goal while avo
                     df = pd.DataFrame(table)
                     wandb.log({"completions": wandb.Table(dataframe=df)})
 
+        # Log compression-specific metrics
+        if (
+            self.log_completions
+            and self.state.global_step % self.args.logging_steps == 0
+            and self.use_context_compression
+        ):
+            # Log compression statistics
+            compression_stats = []
+            for i, comp_info in enumerate(compression_info):
+                if comp_info.get("needed_compression", False):
+                    compression_stats.append(
+                        {
+                            "episode": i,
+                            "compression_count": comp_info.get("compression_count", 0),
+                            "final_reward": (
+                                rewards_to_log[i] if i < len(rewards_to_log) else 0.0
+                            ),
+                        }
+                    )
+
+            if compression_stats and self.accelerator.is_main_process:
+                # Log average compression performance
+                avg_reward_compressed = sum(
+                    s["final_reward"] for s in compression_stats
+                ) / len(compression_stats)
+                avg_reward_uncompressed = sum(
+                    rewards_to_log[i]
+                    for i in range(len(compression_info))
+                    if not compression_info[i].get("needed_compression", False)
+                ) / max(1, len(compression_info) - len(compression_stats))
+
+                print(f"\n[Step {self.state.global_step}] Compression Statistics:")
+                print(
+                    f"  Episodes requiring compression: {len(compression_stats)}/{len(compression_info)}"
+                )
+                print(f"  Avg reward (compressed): {avg_reward_compressed:.3f}")
+                print(f"  Avg reward (uncompressed): {avg_reward_uncompressed:.3f}")
+
         return {
-            "prompt_ids": prompt_ids,
-            "prompt_mask": prompt_mask,
-            "completion_ids": completion_ids,
-            "completion_mask": completion_mask,
+            "prompt_ids": (
+                prompt_ids_list if self.use_context_compression else prompt_ids
+            ),
+            "prompt_mask": (
+                prompt_masks_list if self.use_context_compression else prompt_mask
+            ),
+            "completion_ids": (
+                completion_ids_list if self.use_context_compression else completion_ids
+            ),
+            "completion_mask": (
+                completion_masks_list
+                if self.use_context_compression
+                else completion_mask
+            ),
             "old_per_token_logps": old_per_token_logps,
             "ref_per_token_logps": ref_per_token_logps,
             "advantages": advantages,
+            "compression_info": compression_info,
         }
+
+    def _compute_loss(self, model, inputs):
+        """Override to handle context compression with multiple conversation segments."""
+
+        # Check if we have segmented data (arrays of conversation segments)
+        if (
+            self.use_context_compression
+            and isinstance(inputs["prompt_ids"], list)
+            and any(isinstance(p, list) for p in inputs["prompt_ids"])
+        ):
+
+            # Process each episode's segments
+            total_loss = 0.0
+            total_tokens = 0
+            total_kl = 0.0
+            total_kl_tokens = 0
+            clip_counts = {"low": 0, "high": 0, "region": 0}
+            total_clip_tokens = 0
+
+            device = self.accelerator.device
+            advantages = inputs["advantages"]
+
+            for episode_idx in range(len(inputs["prompt_ids"])):
+                episode_segments = len(inputs["prompt_ids"][episode_idx])
+                episode_advantage = advantages[episode_idx]
+
+                # Process each conversation segment
+                for segment_idx in range(episode_segments):
+                    # Extract segment data
+                    segment_prompt_ids = torch.tensor(
+                        inputs["prompt_ids"][episode_idx][segment_idx], device=device
+                    ).unsqueeze(
+                        0
+                    )  # Add batch dimension
+                    segment_prompt_mask = torch.tensor(
+                        inputs["prompt_mask"][episode_idx][segment_idx], device=device
+                    ).unsqueeze(0)
+                    segment_completion_ids = torch.tensor(
+                        inputs["completion_ids"][episode_idx][segment_idx],
+                        device=device,
+                    ).unsqueeze(0)
+                    segment_completion_mask = torch.tensor(
+                        inputs["completion_mask"][episode_idx][segment_idx],
+                        device=device,
+                    ).unsqueeze(0)
+
+                    # Skip empty segments
+                    if segment_completion_ids.size(1) == 0:
+                        continue
+
+                    # Concatenate prompt and completion
+                    input_ids = torch.cat(
+                        [segment_prompt_ids, segment_completion_ids], dim=1
+                    )
+                    attention_mask = torch.cat(
+                        [segment_prompt_mask, segment_completion_mask], dim=1
+                    )
+                    logits_to_keep = segment_completion_ids.size(1)
+
+                    # Get per-token log probabilities
+                    per_token_logps = self._get_per_token_logps(
+                        model, input_ids, attention_mask, logits_to_keep, batch_size=1
+                    )
+
+                    # Compute old log probs for this segment
+                    with torch.no_grad():
+                        if self.num_iterations > 1:
+                            old_per_token_logps = self._get_per_token_logps(
+                                self.model,
+                                input_ids,
+                                attention_mask,
+                                logits_to_keep,
+                                batch_size=1,
+                            )
+                        else:
+                            old_per_token_logps = per_token_logps.detach()
+
+                    # Compute KL divergence if needed
+                    per_token_kl = None
+                    if self.beta != 0.0:
+                        with torch.no_grad():
+                            if self.ref_model is not None:
+                                ref_per_token_logps = self._get_per_token_logps(
+                                    self.ref_model,
+                                    input_ids,
+                                    attention_mask,
+                                    logits_to_keep,
+                                    batch_size=1,
+                                )
+                            else:
+                                with self.accelerator.unwrap_model(
+                                    self.model
+                                ).disable_adapter():
+                                    ref_per_token_logps = self._get_per_token_logps(
+                                        self.model,
+                                        input_ids,
+                                        attention_mask,
+                                        logits_to_keep,
+                                        batch_size=1,
+                                    )
+                        per_token_kl = (
+                            torch.exp(ref_per_token_logps - per_token_logps)
+                            - (ref_per_token_logps - per_token_logps)
+                            - 1
+                        )
+
+                    # Compute GRPO loss for this segment - using parent's epsilon values
+                    coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+                    coef_2 = torch.clamp(
+                        coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high
+                    )
+
+                    if self.args.delta is not None:
+                        coef_1 = torch.clamp(coef_1, max=self.args.delta)
+
+                    per_token_loss1 = coef_1 * episode_advantage
+                    per_token_loss2 = coef_2 * episode_advantage
+                    per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+
+                    if self.beta != 0.0 and per_token_kl is not None:
+                        per_token_loss = per_token_loss + self.beta * per_token_kl
+
+                    # Apply loss based on type
+                    segment_mask = segment_completion_mask.squeeze(0)
+                    if self.loss_type == "grpo":
+                        segment_loss = (
+                            per_token_loss * segment_mask
+                        ).sum() / segment_mask.sum().clamp(min=1.0)
+                    elif self.loss_type == "bnpo":
+                        segment_loss = (
+                            per_token_loss * segment_mask
+                        ).sum() / segment_mask.sum().clamp(min=1.0)
+                    elif self.loss_type == "dr_grpo":
+                        segment_loss = (
+                            per_token_loss * segment_mask
+                        ).sum() / self.max_completion_length
+                    else:
+                        raise ValueError(f"Unknown loss type: {self.loss_type}")
+
+                    # Accumulate metrics
+                    total_loss += segment_loss * segment_mask.sum()
+                    total_tokens += segment_mask.sum()
+
+                    # Track KL divergence
+                    if per_token_kl is not None:
+                        total_kl += (per_token_kl * segment_mask).sum()
+                        total_kl_tokens += segment_mask.sum()
+
+                    # Track clipping statistics
+                    is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (
+                        episode_advantage < 0
+                    )
+                    is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
+                        episode_advantage > 0
+                    )
+                    is_region_clipped = is_low_clipped | is_high_clipped
+
+                    clip_counts["low"] += (is_low_clipped * segment_mask).sum().item()
+                    clip_counts["high"] += (is_high_clipped * segment_mask).sum().item()
+                    clip_counts["region"] += (
+                        (is_region_clipped * segment_mask).sum().item()
+                    )
+                    total_clip_tokens += segment_mask.sum().item()
+
+            # Average loss across all tokens
+            loss = total_loss / total_tokens.clamp(min=1.0)
+
+            # Log metrics
+            mode = "train" if self.model.training else "eval"
+
+            # Log KL divergence if computed
+            if self.beta != 0.0 and total_kl_tokens > 0:
+                mean_kl = total_kl / total_kl_tokens
+                self._metrics[mode]["kl"].append(
+                    self.accelerator.gather(mean_kl).nanmean().item()
+                )
+
+            # Log clipping statistics
+            if total_clip_tokens > 0:
+                low_clip_ratio = clip_counts["low"] / total_clip_tokens
+                high_clip_ratio = clip_counts["high"] / total_clip_tokens
+                region_clip_ratio = clip_counts["region"] / total_clip_tokens
+
+                gathered_low_clip = self.accelerator.gather(
+                    torch.tensor(low_clip_ratio, device=device)
+                )
+                self._metrics[mode]["clip_ratio/low_mean"].append(
+                    gathered_low_clip.nanmean().item()
+                )
+                self._metrics[mode]["clip_ratio/low_min"].append(
+                    nanmin(gathered_low_clip).item()
+                )
+
+                gathered_high_clip = self.accelerator.gather(
+                    torch.tensor(high_clip_ratio, device=device)
+                )
+                self._metrics[mode]["clip_ratio/high_mean"].append(
+                    gathered_high_clip.nanmean().item()
+                )
+                self._metrics[mode]["clip_ratio/high_max"].append(
+                    nanmax(gathered_high_clip).item()
+                )
+
+                gathered_clip_ratio = self.accelerator.gather(
+                    torch.tensor(region_clip_ratio, device=device)
+                )
+                self._metrics[mode]["clip_ratio/region_mean"].append(
+                    gathered_clip_ratio.nanmean().item()
+                )
+
+            # Log compression-specific metrics
+            compression_info = inputs.get("compression_info", [])
+            if compression_info:
+                num_compressed = sum(
+                    1
+                    for info in compression_info
+                    if info.get("needed_compression", False)
+                )
+                compression_rate = num_compressed / len(compression_info)
+                self._metrics[mode]["compression_rate"].append(compression_rate)
+
+                avg_compressions = sum(
+                    info.get("compression_count", 0) for info in compression_info
+                ) / len(compression_info)
+                self._metrics[mode]["avg_compressions_per_episode"].append(
+                    avg_compressions
+                )
+
+            return loss
+        else:
+            # Fall back to parent implementation for non-compression cases
+            return super()._compute_loss(model, inputs)
 
     def __del__(self):
         """Clean up gym environments when trainer is destroyed."""
