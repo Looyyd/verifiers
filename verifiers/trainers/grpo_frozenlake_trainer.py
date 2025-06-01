@@ -301,8 +301,6 @@ I need to analyze the current state and find the best path to the goal while avo
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
         )
-        # TODO: this is redefined because for some reason otherwise in _prepare_inputs it's not found in args
-        self.steps_per_generation = args.steps_per_generation
 
     def _sample_grid_size(self) -> int:
         """Sample a grid size based on the grid distribution."""
@@ -1549,8 +1547,11 @@ I need to analyze the current state and find the best path to the goal while avo
             )
 
             if mode == "train":
-                # During training, generate once per steps_per_generation
-                generate_every = self.steps_per_generation * self.num_iterations
+                # During training, generate once per gradient_accumulation_steps * num_iterations
+                # This matches the parent class behavior in TRL 0.17.1
+                generate_every = (
+                    self.args.gradient_accumulation_steps * self.num_iterations
+                )
 
                 if not already_generated and (
                     self._step % generate_every == 0 or self._buffered_inputs is None
