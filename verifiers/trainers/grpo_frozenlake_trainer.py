@@ -42,6 +42,8 @@ import gymnasium as gym
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
+DEBUG = True
+
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
     2: 0.2,  # 2x2 grids: 33.3%
@@ -1210,6 +1212,10 @@ I need to analyze the current state and find the best path to the goal while avo
             prompts_to_log = gather_object(prompts)
             completions_to_log = gather_object(completions)
             rewards_to_log = rewards.tolist()
+            if DEBUG:
+                print(f"Prompts to log: {prompts_to_log}")
+                print(f"Completions to log: {completions_to_log}")
+                print(f"Rewards to log: {rewards_to_log}")
 
             if self.accelerator.is_main_process:
                 if is_rich_available():
@@ -1337,6 +1343,12 @@ I need to analyze the current state and find the best path to the goal while avo
                         inputs["completion_mask"][episode_idx][segment_idx],
                         device=device,
                     ).unsqueeze(0)
+
+                    if DEBUG:
+                        print(f"Segment prompt ids: {segment_prompt_ids}")
+                        print(f"Segment prompt mask: {segment_prompt_mask}")
+                        print(f"Segment completion ids: {segment_completion_ids}")
+                        print(f"Segment completion mask: {segment_completion_mask}")
 
                     # Skip empty segments
                     if segment_completion_ids.size(1) == 0:
