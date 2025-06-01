@@ -175,7 +175,7 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         max_episode_steps: int = 50,
         frozen_tile_probability: float = 0.8,
         # Context compression parameters
-        use_context_compression: bool = False,
+        use_context_compression: bool = True,
         compression_threshold: float = 0.8,
         compression_prompt_template: str = (
             "This conversation is getting long. Sum up this conversation so far and the summary "
