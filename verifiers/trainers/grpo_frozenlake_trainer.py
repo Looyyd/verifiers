@@ -535,6 +535,7 @@ I need to analyze the current state and find the best path to the goal while avo
                 # Track conversation segments for proper loss computation
                 "conversation_segments": [],
                 "current_segment_start": 0,  # Track where current segment starts in completion_ids
+                "initial_prompt_ids": None,  # Store the initial prompt_ids for segment creation
             }
             states.append(state)
 
@@ -549,9 +550,8 @@ I need to analyze the current state and find the best path to the goal while avo
         # Ensure we capture final segments before cleanup
         if self.use_context_compression:
             for state in states:
-                if state["conversation_segments"] and state[
-                    "current_segment_start"
-                ] < len(state["completion_ids"]):
+                # Always capture the final segment if there are any completion tokens
+                if state["current_segment_start"] < len(state["completion_ids"]):
                     # Add the final segment
                     segment_completion_ids = state["completion_ids"][
                         state["current_segment_start"] :
@@ -560,14 +560,47 @@ I need to analyze the current state and find the best path to the goal while avo
                         state["current_segment_start"] :
                     ]
 
-                    if segment_completion_ids:  # Only add if there are tokens
+                    # Use the current prompt_ids for this segment
+                    segment_prompt_ids = (
+                        state["prompt_ids"]
+                        if state["prompt_ids"]
+                        else state.get("initial_prompt_ids", [])
+                    )
+
+                    if (
+                        segment_completion_ids and segment_prompt_ids
+                    ):  # Only add if we have both
                         state["conversation_segments"].append(
                             {
-                                "prompt_ids": state["prompt_ids"],
+                                "prompt_ids": segment_prompt_ids,
                                 "completion_ids": segment_completion_ids,
                                 "completion_mask": segment_completion_mask,
                             }
                         )
+                    else:
+                        # This shouldn't happen
+                        print(f"WARNING: Missing data for segment creation")
+                        print(
+                            f"  segment_completion_ids: {len(segment_completion_ids) if segment_completion_ids else 'None'}"
+                        )
+                        print(
+                            f"  segment_prompt_ids: {len(segment_prompt_ids) if segment_prompt_ids else 'None'}"
+                        )
+                        print(
+                            f"  current_segment_start: {state['current_segment_start']}"
+                        )
+                        print(f"  len(completion_ids): {len(state['completion_ids'])}")
+                else:
+                    # Debug why we might not have segments
+                    if len(state["completion_ids"]) == 0:
+                        print(
+                            f"WARNING: Episode completed with no completion_ids at all"
+                        )
+                        print(
+                            f"  episode_outcome: {state.get('episode_outcome', 'Unknown')}"
+                        )
+                        print(f"  steps: {state.get('steps', 0)}")
+                        print(f"  messages: {len(state.get('messages', []))}")
 
         # Extract results with conversation segments
         if self.use_context_compression:
@@ -590,6 +623,15 @@ I need to analyze the current state and find the best path to the goal while avo
                     episode_completion_masks.append(segment["completion_mask"])
                     # Create prompt mask of all 1s
                     episode_prompt_masks.append([1] * len(segment["prompt_ids"]))
+
+                # Ensure we have at least one segment per episode
+                if not episode_prompt_ids:
+                    # This should not happen if the logic above is correct
+                    raise RuntimeError(
+                        f"Episode completed with no segments captured. "
+                        f"completion_ids length: {len(state['completion_ids'])}, "
+                        f"current_segment_start: {state['current_segment_start']}"
+                    )
 
                 all_prompt_ids.append(episode_prompt_ids)
                 all_prompt_masks.append(episode_prompt_masks)
@@ -689,6 +731,9 @@ I need to analyze the current state and find the best path to the goal while avo
             # Initialize prompt_ids on first call
             if len(state["prompt_ids"]) == 0:
                 state["prompt_ids"] = llm_response.prompt_token_ids
+                # Store initial prompt_ids if not already stored
+                if state["initial_prompt_ids"] is None:
+                    state["initial_prompt_ids"] = list(llm_response.prompt_token_ids)
 
             # Add assistant message
             assistant_msg = {
@@ -745,9 +790,16 @@ I need to analyze the current state and find the best path to the goal while avo
                     state["current_segment_start"] :
                 ]
 
+                # Use the current prompt_ids for this segment
+                segment_prompt_ids = (
+                    state["prompt_ids"]
+                    if state["prompt_ids"]
+                    else state.get("initial_prompt_ids", [])
+                )
+
                 state["conversation_segments"].append(
                     {
-                        "prompt_ids": state["prompt_ids"],
+                        "prompt_ids": segment_prompt_ids,
                         "completion_ids": segment_completion_ids,
                         "completion_mask": segment_completion_mask,
                     }
