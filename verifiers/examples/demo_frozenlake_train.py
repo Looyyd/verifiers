@@ -31,7 +31,7 @@ model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
-BATCH_SIZE = 16  # Reduced from 16 for initial testing
+BATCH_SIZE = 4
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
 GAME_REWARD_WEIGHT = 10.0  # Weight for reaching the goal
