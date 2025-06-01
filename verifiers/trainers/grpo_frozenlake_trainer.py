@@ -285,6 +285,10 @@ I need to analyze the current state and find the best path to the goal while avo
         self.epsilon_high = (
             args.epsilon_high if args.epsilon_high is not None else args.epsilon
         )
+        
+        # Initialize attributes for _prepare_inputs override
+        self._step = 0
+        self._buffered_inputs = None
 
         self.sampling_params = SamplingParams(
             max_tokens=self.max_completion_length,
@@ -1526,3 +1530,37 @@ I need to analyze the current state and find the best path to the goal while avo
         for env_info in self._gym_envs.values():
             if "env" in env_info:
                 env_info["env"].close()
+
+    def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
+        """Override to handle list-based inputs when using context compression."""
+        
+        # For context compression, we need to handle the generation differently
+        # because the outputs are lists of segments, not tensors that can be split
+        if self.use_context_compression:
+            mode = "train" if self.model.training else "eval"
+            
+            # Check if we've already generated (outputs will have completion_ids)
+            already_generated = "completion_ids" in inputs and isinstance(inputs.get("completion_ids"), list)
+            
+            if mode == "train":
+                # During training, generate once per steps_per_generation
+                generate_every = self.args.steps_per_generation * self.num_iterations
+                
+                if not already_generated and (self._step % generate_every == 0 or self._buffered_inputs is None):
+                    # Generate completions
+                    inputs = self._generate_and_score_completions(inputs)
+                    self._buffered_inputs = inputs
+                elif not already_generated:
+                    # Use buffered inputs
+                    inputs = self._buffered_inputs
+                    
+                self._step += 1
+            else:
+                # In evaluation mode
+                if not already_generated:
+                    inputs = self._generate_and_score_completions(inputs)
+                    
+            return inputs
+        else:
+            # Fall back to parent implementation for non-compression cases
+            return super()._prepare_inputs(inputs)
