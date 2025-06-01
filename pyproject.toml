@@ -12,6 +12,7 @@ dependencies = [
     "setuptools",
     "deepspeed",
     "accelerate",
+    "bitsandbytes",
     "peft",
     "wandb",
     "rich",
