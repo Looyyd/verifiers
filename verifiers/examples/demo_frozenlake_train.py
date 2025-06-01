@@ -89,6 +89,7 @@ training_args = GRPOConfig(
     loss_type="dr_grpo",
     # DAPO paper, epsilon_high=0.28 seems the most useful contribution
     epsilon_high=0.28,
+    steps_per_generation=None,
 )
 
 # Create and run trainer
