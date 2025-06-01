@@ -73,7 +73,7 @@ training_args = GRPOConfig(
     # TODO: need to increase this for multi step reasoning. or implement a method to contract the prompt length.
     max_completion_length=2048,
     per_device_train_batch_size=BATCH_SIZE,
-    num_generations=16,
+    num_generations=4,
     gradient_accumulation_steps=1,
     gradient_checkpointing=True,
     save_strategy="steps",
