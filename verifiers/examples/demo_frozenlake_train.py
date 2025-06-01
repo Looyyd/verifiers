@@ -26,7 +26,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python verifiers/inference/vllm_serve.py --model  '
 CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file configs/zero3.yaml verifiers/examples/demo_frozenlake_train.py
 """
 
-model_name = "Qwen/Qwen2.5-7B-Instruct"
+# model_name = "Qwen/Qwen2.5-7B-Instruct"
+model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
