@@ -55,7 +55,6 @@ training_args = GRPOConfig(
     log_on_each_node=False,
     log_completions=True,
     report_to="wandb",
-    steps_per_generation=None,
 )
 
 trainer = GRPOTrainer(
