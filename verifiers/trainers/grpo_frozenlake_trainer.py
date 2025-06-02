@@ -42,7 +42,7 @@ import gymnasium as gym
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
-DEBUG = True
+DEBUG = False
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
@@ -1326,27 +1326,39 @@ I need to analyze the current state and find the best path to the goal while avo
 
             for episode_idx in range(len(inputs["prompt_ids"])):
                 episode_segments = len(inputs["prompt_ids"][episode_idx])
-                episode_advantage = advantages[episode_idx]
+                # Ensure advantages is handled properly - it might be a tensor or a scalar
+                if isinstance(advantages, torch.Tensor):
+                    episode_advantage = advantages[episode_idx].item() if advantages.dim() > 0 else advantages.item()
+                else:
+                    episode_advantage = advantages[episode_idx]
 
                 # Process each conversation segment
                 for segment_idx in range(episode_segments):
-                    # Extract segment data
+                    # Convert to tensors BEFORE any model operations
+                    # This ensures proper device placement and avoids DDP issues
+                    segment_prompt_ids_list = inputs["prompt_ids"][episode_idx][segment_idx]
+                    segment_prompt_mask_list = inputs["prompt_mask"][episode_idx][segment_idx]
+                    segment_completion_ids_list = inputs["completion_ids"][episode_idx][segment_idx]
+                    segment_completion_mask_list = inputs["completion_mask"][episode_idx][segment_idx]
+                    
+                    # Skip empty segments
+                    if len(segment_completion_ids_list) == 0:
+                        continue
+                    
+                    # Create tensors with proper device placement
                     segment_prompt_ids = torch.tensor(
-                        inputs["prompt_ids"][episode_idx][segment_idx], device=device
-                    ).unsqueeze(
-                        0
-                    )  # Add batch dimension
+                        segment_prompt_ids_list, dtype=torch.long, device=device
+                    ).unsqueeze(0)  # Add batch dimension
                     segment_prompt_mask = torch.tensor(
-                        inputs["prompt_mask"][episode_idx][segment_idx], device=device
+                        segment_prompt_mask_list, dtype=torch.long, device=device
                     ).unsqueeze(0)
                     segment_completion_ids = torch.tensor(
-                        inputs["completion_ids"][episode_idx][segment_idx],
-                        device=device,
+                        segment_completion_ids_list, dtype=torch.long, device=device
                     ).unsqueeze(0)
                     segment_completion_mask = torch.tensor(
-                        inputs["completion_mask"][episode_idx][segment_idx],
-                        device=device,
+                        segment_completion_mask_list, dtype=torch.long, device=device
                     ).unsqueeze(0)
+                    
                     if DEBUG:
                         print(f"Segment prompt_ids shape: {segment_prompt_ids.shape}")
                         print(
@@ -1356,10 +1368,6 @@ I need to analyze the current state and find the best path to the goal while avo
                             f"Segment completion_mask shape: {segment_completion_mask.shape}"
                         )
                         print(f"Segment prompt_mask shape: {segment_prompt_mask.shape}")
-
-                    # Skip empty segments
-                    if segment_completion_ids.size(1) == 0:
-                        continue
 
                     # Concatenate prompt and completion
                     input_ids = torch.cat(
@@ -1518,24 +1526,6 @@ I need to analyze the current state and find the best path to the goal while avo
                     gathered_clip_ratio.nanmean().item()
                 )
 
-            # Log compression-specific metrics
-            compression_info = inputs.get("compression_info", [])
-            if compression_info:
-                num_compressed = sum(
-                    1
-                    for info in compression_info
-                    if info.get("needed_compression", False)
-                )
-                compression_rate = num_compressed / len(compression_info)
-                self._metrics[mode]["compression_rate"].append(compression_rate)
-
-                avg_compressions = sum(
-                    info.get("compression_count", 0) for info in compression_info
-                ) / len(compression_info)
-                self._metrics[mode]["avg_compressions_per_episode"].append(
-                    avg_compressions
-                )
-
             return loss
         else:
             # Fall back to parent implementation for non-compression cases
@@ -1573,12 +1563,44 @@ I need to analyze the current state and find the best path to the goal while avo
                     self._step % generate_every == 0 or self._buffered_inputs is None
                 ):
                     # Generate completions
-                    inputs = self._generate_and_score_completions(inputs)
-                    self._buffered_inputs = inputs
+                    generated_outputs = self._generate_and_score_completions(inputs)
+                    
+                    # For context compression, we need to manually split the list-based data
+                    # since split_tensor_dict expects tensors
+                    num_chunks = self.args.gradient_accumulation_steps
+                    batch_size = len(inputs) // num_chunks
+                    
+                    self._buffered_inputs = []
+                    for i in range(num_chunks):
+                        start_idx = i * batch_size
+                        end_idx = (i + 1) * batch_size
+                        chunk = {}
+                        
+                        # Handle list-based fields (for segmented data)
+                        for key in ["prompt_ids", "prompt_mask", "completion_ids", "completion_mask"]:
+                            if key in generated_outputs and isinstance(generated_outputs[key], list):
+                                chunk[key] = generated_outputs[key][start_idx:end_idx]
+                            
+                        # Handle tensor fields
+                        for key in ["advantages", "old_per_token_logps", "ref_per_token_logps"]:
+                            if key in generated_outputs:
+                                if isinstance(generated_outputs[key], torch.Tensor):
+                                    chunk[key] = generated_outputs[key][start_idx:end_idx]
+                                else:
+                                    chunk[key] = generated_outputs[key]
+                        
+                        # Handle other fields
+                        for key in ["compression_info"]:
+                            if key in generated_outputs:
+                                chunk[key] = generated_outputs[key][start_idx:end_idx]
+                                
+                        self._buffered_inputs.append(chunk)
+                        
                 elif not already_generated:
                     # Use buffered inputs
-                    inputs = self._buffered_inputs
+                    pass  # self._buffered_inputs is already set
 
+                inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
                 self._step += 1
             else:
                 # In evaluation mode
