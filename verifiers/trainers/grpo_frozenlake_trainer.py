@@ -135,27 +135,6 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
 
     Example usage with context compression:
 
-    ```python
-    trainer = GRPOFrozenLakeTrainer(
-        model="your-model",
-        args=GRPOConfig(
-            # ... other args ...
-            max_completion_length=1024,  # Max tokens before compression
-        ),
-        # Enable context compression
-        use_context_compression=True,
-        compression_threshold=0.8,  # Compress at 80% of max_completion_length
-        compression_prompt_template=(
-            "This conversation is getting long. Sum up this conversation so far "
-            "and the summary will be given to your next instance to continue the task. "
-            "You can use <think> tags to organize your thoughts. "
-            "The content after </think> will be given to your next instance."
-        ),
-        # Other FrozenLake parameters
-        is_slippery=False,
-        max_episode_steps=50,
-    )
-    ```
     """
 
     def __init__(
@@ -178,11 +157,12 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         frozen_tile_probability: float = 0.8,
         # Context compression parameters
         use_context_compression: bool = True,
-        compression_threshold: float = 0.8,
+        compression_threshold: float = 0.75,
         compression_prompt_template: str = (
             "This conversation is getting long. Sum up this conversation so far and the summary "
-            "will be given to your next instance to continue the task. You can use <think> tags "
-            "to organize your thoughts. The content after </think> will be given to your next instance."
+            "will be given to your next instance to continue the task. You MUST use <think> tags "
+            "to organize your thoughts. The content after </think> will be given to your next instance. "
+            "If no <think> tags are used, no summary will be given."
         ),
         **kwargs,
     ):
