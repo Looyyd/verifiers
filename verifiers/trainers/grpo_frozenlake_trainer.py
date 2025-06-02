@@ -667,16 +667,13 @@ I need to analyze the current state and find the best path to the goal while avo
                 "prompt_masks": all_prompt_masks,
                 "completion_ids": all_completion_ids,
                 "completion_masks": all_completion_masks,
-                "messages": completion_messages,
+                "messages": [s["messages"] for s in states],  # Return full messages
                 "episode_outcomes": episode_outcomes,
                 "compression_info": compression_info,
                 "use_segments": True,  # Flag to indicate segmented data
             }
         else:
             # Original non-compression path
-            completion_messages = [
-                s["messages"][s["prompt_messages"] :] for s in states
-            ]
             completion_ids = [s["completion_ids"] for s in states]
             completion_mask = [s["completion_mask"] for s in states]
             episode_outcomes = [s["episode_outcome"] for s in states]
@@ -689,7 +686,7 @@ I need to analyze the current state and find the best path to the goal while avo
 
             return {
                 "ids": completion_ids,
-                "messages": completion_messages,
+                "messages": [s["messages"] for s in states],  # Return full messages
                 "mask": completion_mask,
                 "episode_outcomes": episode_outcomes,
             }
@@ -1232,9 +1229,9 @@ I need to analyze the current state and find the best path to the goal while avo
             if self.accelerator.is_main_process:
                 if is_rich_available():
                     print_prompt_completions_sample(
-                        [str(prompts_to_log[0][-1]["content"])],
-                        [completions_to_log[0]],
-                        [rewards_to_log[0]],
+                        [str(prompts_to_log[i][0]["content"]) for i in range(len(prompts_to_log))], # Use initial system/user prompt as title
+                        completions_to_log, # Pass full message histories
+                        rewards_to_log,
                         self.state.global_step,
                     )
                 if (
@@ -1242,15 +1239,28 @@ I need to analyze the current state and find the best path to the goal while avo
                     and "wandb" in self.args.report_to
                     and wandb.run is not None
                 ):
+                    # Prepare data for wandb logging
+                    wandb_data = []
+                    for i in range(len(prompts_to_log)):
+                        # Create a string representation of the full conversation
+                        conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in completions_to_log[i]])
+                        initial_prompt_text = ""
+                        if prompts_to_log[i]:
+                             # Attempt to get a meaningful initial prompt text
+                            if prompts_to_log[i][0]["role"] == "system" and len(prompts_to_log[i]) > 1:
+                                initial_prompt_text = str(prompts_to_log[i][1]["content"]) # User prompt after system
+                            else:
+                                initial_prompt_text = str(prompts_to_log[i][0]["content"]) # First message if no system or only system
 
-                    table = {
-                        "step": [str(self.state.global_step)] * len(rewards),
-                        "prompt": prompts_to_log,
-                        "completion": completions_to_log,
-                        "reward": rewards.tolist(),
-                    }
-                    df = pd.DataFrame(table)
-                    wandb.log({"completions": wandb.Table(dataframe=df)})
+                        wandb_data.append({
+                            "step": str(self.state.global_step),
+                            "initial_prompt": initial_prompt_text,
+                            "full_conversation": conversation_text,
+                            "reward": rewards_to_log[i] if i < len(rewards_to_log) else float('nan'),
+                        })
+                    
+                    df = pd.DataFrame(wandb_data)
+                    wandb.log({"episode_logs": wandb.Table(dataframe=df)})
 
         # Log compression-specific metrics
         if (
