@@ -1361,6 +1361,15 @@ I need to analyze the current state and find the best path to the goal while avo
                         inputs["completion_mask"][episode_idx][segment_idx],
                         device=device,
                     ).unsqueeze(0)
+                    if DEBUG:
+                        print(f"Segment prompt_ids shape: {segment_prompt_ids.shape}")
+                        print(
+                            f"Segment completion_ids shape: {segment_completion_ids.shape}"
+                        )
+                        print(
+                            f"Segment completion_mask shape: {segment_completion_mask.shape}"
+                        )
+                        print(f"Segment prompt_mask shape: {segment_prompt_mask.shape}")
 
                     # Skip empty segments
                     if segment_completion_ids.size(1) == 0:
