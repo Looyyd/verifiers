@@ -1227,7 +1227,6 @@ I need to analyze the current state and find the best path to the goal while avo
                         self.state.global_step,
                     )
 
-
         # Log compression-specific metrics
         if (
             self.log_completions
@@ -1313,218 +1312,232 @@ I need to analyze the current state and find the best path to the goal while avo
                     f"Inputs advantages shape: {get_nested_shape(inputs['advantages'])}"
                 )
 
-            # Process each episode's segments
-            total_loss = 0.0
-            total_tokens = 0
-            total_kl = 0.0
-            total_kl_tokens = 0
-            clip_counts = {"low": 0, "high": 0, "region": 0}
-            total_clip_tokens = 0
-
             device = self.accelerator.device
-            advantages = inputs["advantages"]
 
+            # Collect all segments and their metadata
+            all_prompt_ids = []
+            all_prompt_masks = []
+            all_completion_ids = []
+            all_completion_masks = []
+            segment_to_episode = []  # Maps segment index to episode index
+            episode_advantages = []  # Advantage for each segment
+
+            # Flatten all segments into lists
             for episode_idx in range(len(inputs["prompt_ids"])):
-                episode_segments = len(inputs["prompt_ids"][episode_idx])
-                # Ensure advantages is handled properly - it might be a tensor or a scalar
-                if isinstance(advantages, torch.Tensor):
-                    episode_advantage = advantages[episode_idx].item() if advantages.dim() > 0 else advantages.item()
+                # Get episode advantage
+                if isinstance(inputs["advantages"], torch.Tensor):
+                    episode_advantage = (
+                        inputs["advantages"][episode_idx].item()
+                        if inputs["advantages"].dim() > 0
+                        else inputs["advantages"].item()
+                    )
                 else:
-                    episode_advantage = advantages[episode_idx]
+                    episode_advantage = inputs["advantages"][episode_idx]
 
-                # Process each conversation segment
-                for segment_idx in range(episode_segments):
-                    # Convert to tensors BEFORE any model operations
-                    # This ensures proper device placement and avoids DDP issues
-                    segment_prompt_ids_list = inputs["prompt_ids"][episode_idx][segment_idx]
-                    segment_prompt_mask_list = inputs["prompt_mask"][episode_idx][segment_idx]
-                    segment_completion_ids_list = inputs["completion_ids"][episode_idx][segment_idx]
-                    segment_completion_mask_list = inputs["completion_mask"][episode_idx][segment_idx]
-                    
+                # Process each segment in the episode
+                for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
+                    segment_completion_ids = inputs["completion_ids"][episode_idx][
+                        segment_idx
+                    ]
+
                     # Skip empty segments
-                    if len(segment_completion_ids_list) == 0:
+                    if len(segment_completion_ids) == 0:
                         continue
-                    
-                    # Create tensors with proper device placement
-                    segment_prompt_ids = torch.tensor(
-                        segment_prompt_ids_list, dtype=torch.long, device=device
-                    ).unsqueeze(0)  # Add batch dimension
-                    segment_prompt_mask = torch.tensor(
-                        segment_prompt_mask_list, dtype=torch.long, device=device
-                    ).unsqueeze(0)
-                    segment_completion_ids = torch.tensor(
-                        segment_completion_ids_list, dtype=torch.long, device=device
-                    ).unsqueeze(0)
-                    segment_completion_mask = torch.tensor(
-                        segment_completion_mask_list, dtype=torch.long, device=device
-                    ).unsqueeze(0)
-                    
-                    if DEBUG:
-                        print(f"Segment prompt_ids shape: {segment_prompt_ids.shape}")
-                        print(
-                            f"Segment completion_ids shape: {segment_completion_ids.shape}"
+
+                    # Add segment data
+                    all_prompt_ids.append(
+                        inputs["prompt_ids"][episode_idx][segment_idx]
+                    )
+                    all_prompt_masks.append(
+                        inputs["prompt_mask"][episode_idx][segment_idx]
+                    )
+                    all_completion_ids.append(segment_completion_ids)
+                    all_completion_masks.append(
+                        inputs["completion_mask"][episode_idx][segment_idx]
+                    )
+                    segment_to_episode.append(episode_idx)
+                    episode_advantages.append(episode_advantage)
+
+            # If no valid segments, return zero loss
+            if not all_prompt_ids:
+                return torch.tensor(0.0, device=device, requires_grad=True)
+
+            # Convert to tensors and pad
+            # Find max lengths
+            max_prompt_len = max(len(ids) for ids in all_prompt_ids)
+            max_completion_len = max(len(ids) for ids in all_completion_ids)
+
+            # Create padded tensors
+            batch_size = len(all_prompt_ids)
+            prompt_ids = torch.full(
+                (batch_size, max_prompt_len),
+                self.processing_class.pad_token_id,
+                dtype=torch.long,
+                device=device,
+            )
+            prompt_mask = torch.zeros(
+                (batch_size, max_prompt_len), dtype=torch.long, device=device
+            )
+            completion_ids = torch.full(
+                (batch_size, max_completion_len),
+                self.processing_class.pad_token_id,
+                dtype=torch.long,
+                device=device,
+            )
+            completion_mask = torch.zeros(
+                (batch_size, max_completion_len), dtype=torch.long, device=device
+            )
+
+            # Fill in the actual values
+            for i in range(batch_size):
+                prompt_len = len(all_prompt_ids[i])
+                completion_len = len(all_completion_ids[i])
+
+                prompt_ids[i, :prompt_len] = torch.tensor(
+                    all_prompt_ids[i], dtype=torch.long, device=device
+                )
+                prompt_mask[i, :prompt_len] = torch.tensor(
+                    all_prompt_masks[i], dtype=torch.long, device=device
+                )
+                completion_ids[i, :completion_len] = torch.tensor(
+                    all_completion_ids[i], dtype=torch.long, device=device
+                )
+                completion_mask[i, :completion_len] = torch.tensor(
+                    all_completion_masks[i], dtype=torch.long, device=device
+                )
+
+            # Concatenate prompt and completion
+            input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+            logits_to_keep = completion_ids.size(1)
+
+            # Get per-token log probabilities for all segments at once
+            per_token_logps = self._get_per_token_logps(
+                model, input_ids, attention_mask, logits_to_keep, batch_size=batch_size
+            )
+
+            # Compute old log probs
+            with torch.no_grad():
+                if self.num_iterations > 1:
+                    old_per_token_logps = self._get_per_token_logps(
+                        self.model,
+                        input_ids,
+                        attention_mask,
+                        logits_to_keep,
+                        batch_size=batch_size,
+                    )
+                else:
+                    old_per_token_logps = per_token_logps.detach()
+
+            # Compute KL divergence if needed
+            if self.beta != 0.0:
+                with torch.no_grad():
+                    if self.ref_model is not None:
+                        ref_per_token_logps = self._get_per_token_logps(
+                            self.ref_model,
+                            input_ids,
+                            attention_mask,
+                            logits_to_keep,
+                            batch_size=batch_size,
                         )
-                        print(
-                            f"Segment completion_mask shape: {segment_completion_mask.shape}"
-                        )
-                        print(f"Segment prompt_mask shape: {segment_prompt_mask.shape}")
-
-                    # Concatenate prompt and completion
-                    input_ids = torch.cat(
-                        [segment_prompt_ids, segment_completion_ids], dim=1
-                    )
-                    attention_mask = torch.cat(
-                        [segment_prompt_mask, segment_completion_mask], dim=1
-                    )
-                    logits_to_keep = segment_completion_ids.size(1)
-
-                    # Get per-token log probabilities
-                    per_token_logps = self._get_per_token_logps(
-                        model, input_ids, attention_mask, logits_to_keep, batch_size=1
-                    )
-
-                    # Compute old log probs for this segment
-                    with torch.no_grad():
-                        if self.num_iterations > 1:
-                            old_per_token_logps = self._get_per_token_logps(
+                    else:
+                        with self.accelerator.unwrap_model(
+                            self.model
+                        ).disable_adapter():
+                            ref_per_token_logps = self._get_per_token_logps(
                                 self.model,
                                 input_ids,
                                 attention_mask,
                                 logits_to_keep,
-                                batch_size=1,
+                                batch_size=batch_size,
                             )
-                        else:
-                            old_per_token_logps = per_token_logps.detach()
+                per_token_kl = (
+                    torch.exp(ref_per_token_logps - per_token_logps)
+                    - (ref_per_token_logps - per_token_logps)
+                    - 1
+                )
 
-                    # Compute KL divergence if needed
-                    per_token_kl = None
-                    if self.beta != 0.0:
-                        with torch.no_grad():
-                            if self.ref_model is not None:
-                                ref_per_token_logps = self._get_per_token_logps(
-                                    self.ref_model,
-                                    input_ids,
-                                    attention_mask,
-                                    logits_to_keep,
-                                    batch_size=1,
-                                )
-                            else:
-                                with self.accelerator.unwrap_model(
-                                    self.model
-                                ).disable_adapter():
-                                    ref_per_token_logps = self._get_per_token_logps(
-                                        self.model,
-                                        input_ids,
-                                        attention_mask,
-                                        logits_to_keep,
-                                        batch_size=1,
-                                    )
-                        per_token_kl = (
-                            torch.exp(ref_per_token_logps - per_token_logps)
-                            - (ref_per_token_logps - per_token_logps)
-                            - 1
-                        )
+            # Create advantages tensor for broadcasting
+            advantages_tensor = torch.tensor(
+                episode_advantages, dtype=torch.float32, device=device
+            ).unsqueeze(1)
 
-                    # Compute GRPO loss for this segment - using parent's epsilon values
-                    coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-                    coef_2 = torch.clamp(
-                        coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high
-                    )
+            # Compute GRPO loss
+            coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+            coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
 
-                    per_token_loss1 = coef_1 * episode_advantage
-                    per_token_loss2 = coef_2 * episode_advantage
-                    per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+            per_token_loss1 = coef_1 * advantages_tensor
+            per_token_loss2 = coef_2 * advantages_tensor
+            per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
 
-                    if self.beta != 0.0 and per_token_kl is not None:
-                        per_token_loss = per_token_loss + self.beta * per_token_kl
+            if self.beta != 0.0:
+                per_token_loss = per_token_loss + self.beta * per_token_kl
 
-                    # Apply loss based on type
-                    segment_mask = segment_completion_mask.squeeze(0)
-                    if self.loss_type == "grpo":
-                        segment_loss = (
-                            per_token_loss * segment_mask
-                        ).sum() / segment_mask.sum().clamp(min=1.0)
-                    elif self.loss_type == "bnpo":
-                        segment_loss = (
-                            per_token_loss * segment_mask
-                        ).sum() / segment_mask.sum().clamp(min=1.0)
-                    elif self.loss_type == "dr_grpo":
-                        segment_loss = (
-                            per_token_loss * segment_mask
-                        ).sum() / self.max_completion_length
-                    else:
-                        raise ValueError(f"Unknown loss type: {self.loss_type}")
-
-                    # Accumulate metrics
-                    total_loss += segment_loss * segment_mask.sum()
-                    total_tokens += segment_mask.sum()
-
-                    # Track KL divergence
-                    if per_token_kl is not None:
-                        total_kl += (per_token_kl * segment_mask).sum()
-                        total_kl_tokens += segment_mask.sum()
-
-                    # Track clipping statistics
-                    is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (
-                        episode_advantage < 0
-                    )
-                    is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
-                        episode_advantage > 0
-                    )
-                    is_region_clipped = is_low_clipped | is_high_clipped
-
-                    clip_counts["low"] += (is_low_clipped * segment_mask).sum().item()
-                    clip_counts["high"] += (is_high_clipped * segment_mask).sum().item()
-                    clip_counts["region"] += (
-                        (is_region_clipped * segment_mask).sum().item()
-                    )
-                    total_clip_tokens += segment_mask.sum().item()
-
-            # Average loss across all tokens
-            loss = total_loss / total_tokens.clamp(min=1.0)
+            # Apply loss based on type
+            if self.loss_type == "grpo":
+                # Per-segment loss, then average
+                segment_losses = (per_token_loss * completion_mask).sum(
+                    dim=1
+                ) / completion_mask.sum(dim=1).clamp(min=1.0)
+                loss = segment_losses.mean()
+            elif self.loss_type == "bnpo":
+                # Total loss normalized by total tokens
+                loss = (
+                    per_token_loss * completion_mask
+                ).sum() / completion_mask.sum().clamp(min=1.0)
+            elif self.loss_type == "dr_grpo":
+                # Loss normalized by batch size and max completion length
+                loss = (per_token_loss * completion_mask).sum() / (
+                    batch_size * self.max_completion_length
+                )
+            else:
+                raise ValueError(f"Unknown loss type: {self.loss_type}")
 
             # Log metrics
             mode = "train" if self.model.training else "eval"
 
             # Log KL divergence if computed
-            if self.beta != 0.0 and total_kl_tokens > 0:
-                mean_kl = total_kl / total_kl_tokens
+            if self.beta != 0.0:
+                mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
                 self._metrics[mode]["kl"].append(
                     self.accelerator.gather(mean_kl).nanmean().item()
                 )
 
-            # Log clipping statistics
-            if total_clip_tokens > 0:
-                low_clip_ratio = clip_counts["low"] / total_clip_tokens
-                high_clip_ratio = clip_counts["high"] / total_clip_tokens
-                region_clip_ratio = clip_counts["region"] / total_clip_tokens
+            # Compute clipping statistics
+            is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages_tensor < 0)
+            is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages_tensor > 0)
+            is_region_clipped = is_low_clipped | is_high_clipped
 
-                gathered_low_clip = self.accelerator.gather(
-                    torch.tensor(low_clip_ratio, device=device)
-                )
-                self._metrics[mode]["clip_ratio/low_mean"].append(
-                    gathered_low_clip.nanmean().item()
-                )
-                self._metrics[mode]["clip_ratio/low_min"].append(
-                    nanmin(gathered_low_clip).item()
-                )
+            low_clip_ratio = (
+                is_low_clipped * completion_mask
+            ).sum() / completion_mask.sum()
+            high_clip_ratio = (
+                is_high_clipped * completion_mask
+            ).sum() / completion_mask.sum()
+            region_clip_ratio = (
+                is_region_clipped * completion_mask
+            ).sum() / completion_mask.sum()
 
-                gathered_high_clip = self.accelerator.gather(
-                    torch.tensor(high_clip_ratio, device=device)
-                )
-                self._metrics[mode]["clip_ratio/high_mean"].append(
-                    gathered_high_clip.nanmean().item()
-                )
-                self._metrics[mode]["clip_ratio/high_max"].append(
-                    nanmax(gathered_high_clip).item()
-                )
+            gathered_low_clip = self.accelerator.gather(low_clip_ratio)
+            self._metrics[mode]["clip_ratio/low_mean"].append(
+                gathered_low_clip.nanmean().item()
+            )
+            self._metrics[mode]["clip_ratio/low_min"].append(
+                nanmin(gathered_low_clip).item()
+            )
 
-                gathered_clip_ratio = self.accelerator.gather(
-                    torch.tensor(region_clip_ratio, device=device)
-                )
-                self._metrics[mode]["clip_ratio/region_mean"].append(
-                    gathered_clip_ratio.nanmean().item()
-                )
+            gathered_high_clip = self.accelerator.gather(high_clip_ratio)
+            self._metrics[mode]["clip_ratio/high_mean"].append(
+                gathered_high_clip.nanmean().item()
+            )
+            self._metrics[mode]["clip_ratio/high_max"].append(
+                nanmax(gathered_high_clip).item()
+            )
+
+            gathered_clip_ratio = self.accelerator.gather(region_clip_ratio)
+            self._metrics[mode]["clip_ratio/region_mean"].append(
+                gathered_clip_ratio.nanmean().item()
+            )
 
             return loss
         else:
@@ -1564,43 +1577,58 @@ I need to analyze the current state and find the best path to the goal while avo
                 ):
                     # Generate completions
                     generated_outputs = self._generate_and_score_completions(inputs)
-                    
+
                     # For context compression, we need to manually split the list-based data
                     # since split_tensor_dict expects tensors
                     num_chunks = self.args.gradient_accumulation_steps
                     batch_size = len(inputs) // num_chunks
-                    
+
                     self._buffered_inputs = []
                     for i in range(num_chunks):
                         start_idx = i * batch_size
                         end_idx = (i + 1) * batch_size
                         chunk = {}
-                        
+
                         # Handle list-based fields (for segmented data)
-                        for key in ["prompt_ids", "prompt_mask", "completion_ids", "completion_mask"]:
-                            if key in generated_outputs and isinstance(generated_outputs[key], list):
+                        for key in [
+                            "prompt_ids",
+                            "prompt_mask",
+                            "completion_ids",
+                            "completion_mask",
+                        ]:
+                            if key in generated_outputs and isinstance(
+                                generated_outputs[key], list
+                            ):
                                 chunk[key] = generated_outputs[key][start_idx:end_idx]
-                            
+
                         # Handle tensor fields
-                        for key in ["advantages", "old_per_token_logps", "ref_per_token_logps"]:
+                        for key in [
+                            "advantages",
+                            "old_per_token_logps",
+                            "ref_per_token_logps",
+                        ]:
                             if key in generated_outputs:
                                 if isinstance(generated_outputs[key], torch.Tensor):
-                                    chunk[key] = generated_outputs[key][start_idx:end_idx]
+                                    chunk[key] = generated_outputs[key][
+                                        start_idx:end_idx
+                                    ]
                                 else:
                                     chunk[key] = generated_outputs[key]
-                        
+
                         # Handle other fields
                         for key in ["compression_info"]:
                             if key in generated_outputs:
                                 chunk[key] = generated_outputs[key][start_idx:end_idx]
-                                
+
                         self._buffered_inputs.append(chunk)
-                        
+
                 elif not already_generated:
                     # Use buffered inputs
                     pass  # self._buffered_inputs is already set
 
-                inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
+                inputs = self._buffered_inputs[
+                    self._step % self.args.gradient_accumulation_steps
+                ]
                 self._step += 1
             else:
                 # In evaluation mode
