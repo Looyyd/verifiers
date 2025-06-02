@@ -399,6 +399,7 @@ I need to analyze the current state and find the best path to the goal while avo
                     last_assistant_msg = msg
                     break
 
+            # We can only check the last one, because if 1 message is incorrect we end the episode
             if last_assistant_msg is None:
                 rewards.append(-0.1)
                 continue
@@ -428,6 +429,7 @@ I need to analyze the current state and find the best path to the goal while avo
             else:
                 base_reward = 0.0  # No bonus for poor format
 
+            # TODO: Add penalty if messages contain think tags but no compression was done
             # Apply penalty if this was a compression response without think tags
             # (This information would need to be passed through the episode data)
             # For now, we'll skip this as it would require modifying the data flow
@@ -760,10 +762,7 @@ I need to analyze the current state and find the best path to the goal while avo
 
                 # Check if the model used think tags
                 has_think_tags = "</think>" in summary_text
-                if DEBUG:
-                    print("Compressing because is_compressing is True")
-                    print(f"has_think_tags: {has_think_tags}")
-                    print(f"summary_text: {summary_text}")
+
                 if has_think_tags:
                     # Extract content after </think>
                     summary_text = summary_text.split("</think>", 1)[1].strip()
@@ -835,9 +834,6 @@ I need to analyze the current state and find the best path to the goal while avo
 
                 # Reset prompt_ids for the new segment
                 state["prompt_ids"] = []  # Will be set on next LLM call
-
-                if DEBUG:
-                    print(f"State after compression: {state}")
 
                 # Don't increment steps for compression
                 return j, state
@@ -925,28 +921,28 @@ I need to analyze the current state and find the best path to the goal while avo
 
             # Truncate if too long
             # TODO: should this be done????? or just let it be handled by the trainer?
-            if len(state["completion_ids"]) > sampling_params.max_tokens:
-                state["completed"] = True
-                # Truncate only the part after current segment start
-                max_segment_tokens = (
-                    sampling_params.max_tokens - state["current_segment_start"]
-                )
-                segment_ids = state["completion_ids"][state["current_segment_start"] :][
-                    :max_segment_tokens
-                ]
-                segment_mask = state["completion_mask"][
-                    state["current_segment_start"] :
-                ][:max_segment_tokens]
+            # if len(state["completion_ids"]) > sampling_params.max_tokens:
+            #     state["completed"] = True
+            #     # Truncate only the part after current segment start
+            #     max_segment_tokens = (
+            #         sampling_params.max_tokens - state["current_segment_start"]
+            #     )
+            #     segment_ids = state["completion_ids"][state["current_segment_start"] :][
+            #         :max_segment_tokens
+            #     ]
+            #     segment_mask = state["completion_mask"][
+            #         state["current_segment_start"] :
+            #     ][:max_segment_tokens]
 
-                # Update the full arrays
-                state["completion_ids"] = (
-                    state["completion_ids"][: state["current_segment_start"]]
-                    + segment_ids
-                )
-                state["completion_mask"] = (
-                    state["completion_mask"][: state["current_segment_start"]]
-                    + segment_mask
-                )
+            #     # Update the full arrays
+            #     state["completion_ids"] = (
+            #         state["completion_ids"][: state["current_segment_start"]]
+            #         + segment_ids
+            #     )
+            #     state["completion_mask"] = (
+            #         state["completion_mask"][: state["current_segment_start"]]
+            #         + segment_mask
+            #     )
 
             return j, state
 
@@ -1053,8 +1049,6 @@ I need to analyze the current state and find the best path to the goal while avo
             compression_info = [None] * len(all_prompts)
 
         # Broadcast all data
-        if DEBUG:
-            print(f"Completions messages before broadcast: {completion_messages}")
         prompt_ids_list = broadcast_object_list(prompt_ids_list, from_process=0)
         prompt_masks_list = broadcast_object_list(prompt_masks_list, from_process=0)
         completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
@@ -1065,8 +1059,6 @@ I need to analyze the current state and find the best path to the goal while avo
         history_for_logging = broadcast_object_list(history_for_logging, from_process=0)
         episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
         compression_info = broadcast_object_list(compression_info, from_process=0)
-        if DEBUG:
-            print(f"Completions messages after broadcast: {completion_messages}")
 
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
@@ -1226,10 +1218,6 @@ I need to analyze the current state and find the best path to the goal while avo
             prompts_to_log = gather_object(prompts)
             history_for_logging_to_log = gather_object(history_for_logging)
             rewards_to_log = rewards.tolist()
-            if DEBUG:
-                print(f"Prompts to log: {prompts_to_log}")
-                print(f"History for logging to log: {history_for_logging_to_log}")
-                print(f"Rewards to log: {rewards_to_log}")
 
             if self.accelerator.is_main_process:
                 if is_rich_available():
@@ -1322,6 +1310,14 @@ I need to analyze the current state and find the best path to the goal while avo
             and isinstance(inputs["prompt_ids"], list)
             and any(isinstance(p, list) for p in inputs["prompt_ids"])
         ):
+            if DEBUG:
+                print(f"Inputs prompt_ids shape: {inputs['prompt_ids'].shape}")
+                print(f"Inputs completion_ids shape: {inputs['completion_ids'].shape}")
+                print(f"Inputs prompt_mask shape: {inputs['prompt_mask'].shape}")
+                print(
+                    f"Inputs completion_mask shape: {inputs['completion_mask'].shape}"
+                )
+                print(f"Inputs advantages shape: {inputs['advantages'].shape}")
 
             # Process each episode's segments
             total_loss = 0.0
@@ -1357,12 +1353,6 @@ I need to analyze the current state and find the best path to the goal while avo
                         inputs["completion_mask"][episode_idx][segment_idx],
                         device=device,
                     ).unsqueeze(0)
-
-                    if DEBUG:
-                        print(f"Segment prompt ids: {segment_prompt_ids}")
-                        print(f"Segment prompt mask: {segment_prompt_mask}")
-                        print(f"Segment completion ids: {segment_completion_ids}")
-                        print(f"Segment completion mask: {segment_completion_mask}")
 
                     # Skip empty segments
                     if segment_completion_ids.size(1) == 0:
