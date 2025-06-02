@@ -42,7 +42,7 @@ import gymnasium as gym
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
-DEBUG = True
+DEBUG = False
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
@@ -542,6 +542,7 @@ I need to analyze the current state and find the best path to the goal while avo
                 "conversation_segments": [],
                 "current_segment_start": 0,  # Track where current segment starts in completion_ids
                 "initial_prompt_ids": None,  # Store the initial prompt_ids for segment creation
+                "history_for_logging": deepcopy(m),  # Keep full history for logging
             }
             states.append(state)
 
@@ -667,7 +668,9 @@ I need to analyze the current state and find the best path to the goal while avo
                 "prompt_masks": all_prompt_masks,
                 "completion_ids": all_completion_ids,
                 "completion_masks": all_completion_masks,
-                "messages": [s["messages"] for s in states],  # Return full messages
+                "messages": [
+                    s["history_for_logging"] for s in states
+                ],  # Use history for logging
                 "episode_outcomes": episode_outcomes,
                 "compression_info": compression_info,
                 "use_segments": True,  # Flag to indicate segmented data
@@ -686,7 +689,9 @@ I need to analyze the current state and find the best path to the goal while avo
 
             return {
                 "ids": completion_ids,
-                "messages": [s["messages"] for s in states],  # Return full messages
+                "messages": [
+                    s["history_for_logging"] for s in states
+                ],  # Use history for logging
                 "mask": completion_mask,
                 "episode_outcomes": episode_outcomes,
             }
@@ -744,6 +749,9 @@ I need to analyze the current state and find the best path to the goal while avo
                 "content": llm_response.outputs[0].text,
             }
             state["messages"].append(assistant_msg)
+            state["history_for_logging"].append(
+                assistant_msg
+            )  # Also add to logging history
 
             # Update token tracking - APPEND, don't overwrite
             total_prev_len = len(state["prompt_ids"]) + len(state["completion_ids"])
@@ -830,6 +838,9 @@ I need to analyze the current state and find the best path to the goal while avo
                 if state["messages"][0]["role"] == "system":
                     new_messages.append(state["messages"][0])
                 new_messages.append({"role": "user", "content": compressed_user_msg})
+                state["history_for_logging"].append(
+                    {"role": "user", "content": compressed_user_msg}
+                )
 
                 # Update state for new segment
                 state["messages"] = new_messages
@@ -900,6 +911,12 @@ I need to analyze the current state and find the best path to the goal while avo
                                     "content": self.compression_prompt_template,
                                 }
                             )
+                            state["history_for_logging"].append(
+                                {
+                                    "role": "user",
+                                    "content": self.compression_prompt_template,
+                                }
+                            )
                             state["is_compressing"] = True
                         else:
                             # Continue episode - add next state
@@ -910,6 +927,7 @@ I need to analyze the current state and find the best path to the goal while avo
                                 ),
                             }
                             state["messages"].append(env_msg)
+                            state["history_for_logging"].append(env_msg)
 
                 except Exception as e:
                     # Error in gym step
@@ -1019,6 +1037,7 @@ I need to analyze the current state and find the best path to the goal while avo
                 completion_ids_list = env_result["completion_ids"]
                 completion_masks_list = env_result["completion_masks"]
                 completion_messages = env_result["messages"]
+                history_for_logging = env_result["history_for_logging"]
                 episode_outcomes = env_result.get(
                     "episode_outcomes", [None] * len(all_prompts)
                 )
@@ -1036,6 +1055,7 @@ I need to analyze the current state and find the best path to the goal while avo
                 completion_ids_list = [[ids] for ids in env_result["ids"]]
                 completion_masks_list = [[mask] for mask in env_result["mask"]]
                 completion_messages = env_result["messages"]
+                history_for_logging = env_result["history_for_logging"]
                 episode_outcomes = env_result.get(
                     "episode_outcomes", [None] * len(all_prompts)
                 )
@@ -1046,6 +1066,7 @@ I need to analyze the current state and find the best path to the goal while avo
             completion_ids_list = [None] * len(all_prompts)
             completion_masks_list = [None] * len(all_prompts)
             completion_messages = [None] * len(all_prompts)
+            history_for_logging = [None] * len(all_prompts)
             episode_outcomes = [None] * len(all_prompts)
             compression_info = [None] * len(all_prompts)
 
@@ -1059,6 +1080,7 @@ I need to analyze the current state and find the best path to the goal while avo
             completion_masks_list, from_process=0
         )
         completion_messages = broadcast_object_list(completion_messages, from_process=0)
+        history_for_logging = broadcast_object_list(history_for_logging, from_process=0)
         episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
         compression_info = broadcast_object_list(compression_info, from_process=0)
         if DEBUG:
@@ -1075,6 +1097,7 @@ I need to analyze the current state and find the best path to the goal while avo
         completion_ids_list = completion_ids_list[process_slice]
         completion_masks_list = completion_masks_list[process_slice]
         completion_messages = completion_messages[process_slice]
+        history_for_logging = history_for_logging[process_slice]
         episode_outcomes = episode_outcomes[process_slice]
         compression_info = compression_info[process_slice]
 
@@ -1219,19 +1242,19 @@ I need to analyze the current state and find the best path to the goal while avo
             and self.state.global_step % self.args.logging_steps == 0
         ):
             prompts_to_log = gather_object(prompts)
-            completions_to_log = gather_object(completions)
+            history_for_logging_to_log = gather_object(history_for_logging)
             rewards_to_log = rewards.tolist()
             if DEBUG:
                 print(f"Prompts to log: {prompts_to_log}")
-                print(f"Completions to log: {completions_to_log}")
+                print(f"History for logging to log: {history_for_logging_to_log}")
                 print(f"Rewards to log: {rewards_to_log}")
 
             if self.accelerator.is_main_process:
                 if is_rich_available():
                     print_prompt_completions_sample(
-                        [str(prompts_to_log[i][0]["content"]) for i in range(len(prompts_to_log))], # Use initial system/user prompt as title
-                        completions_to_log, # Pass full message histories
-                        rewards_to_log,
+                        [str(prompts_to_log[0][-1]["content"])],
+                        [history_for_logging_to_log[0]],
+                        [rewards_to_log[0]],
                         self.state.global_step,
                     )
                 if (
@@ -1239,28 +1262,15 @@ I need to analyze the current state and find the best path to the goal while avo
                     and "wandb" in self.args.report_to
                     and wandb.run is not None
                 ):
-                    # Prepare data for wandb logging
-                    wandb_data = []
-                    for i in range(len(prompts_to_log)):
-                        # Create a string representation of the full conversation
-                        conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in completions_to_log[i]])
-                        initial_prompt_text = ""
-                        if prompts_to_log[i]:
-                             # Attempt to get a meaningful initial prompt text
-                            if prompts_to_log[i][0]["role"] == "system" and len(prompts_to_log[i]) > 1:
-                                initial_prompt_text = str(prompts_to_log[i][1]["content"]) # User prompt after system
-                            else:
-                                initial_prompt_text = str(prompts_to_log[i][0]["content"]) # First message if no system or only system
 
-                        wandb_data.append({
-                            "step": str(self.state.global_step),
-                            "initial_prompt": initial_prompt_text,
-                            "full_conversation": conversation_text,
-                            "reward": rewards_to_log[i] if i < len(rewards_to_log) else float('nan'),
-                        })
-                    
-                    df = pd.DataFrame(wandb_data)
-                    wandb.log({"episode_logs": wandb.Table(dataframe=df)})
+                    table = {
+                        "step": [str(self.state.global_step)] * len(rewards),
+                        "prompt": prompts_to_log,
+                        "history_for_logging": history_for_logging_to_log,
+                        "reward": rewards.tolist(),
+                    }
+                    df = pd.DataFrame(table)
+                    wandb.log({"completions": wandb.Table(dataframe=df)})
 
         # Log compression-specific metrics
         if (
