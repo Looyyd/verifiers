@@ -1222,8 +1222,8 @@ I need to analyze the current state and find the best path to the goal while avo
             if self.accelerator.is_main_process:
                 if is_rich_available():
                     print_prompt_completions_sample(
-                        [str(prompts_to_log[0][-1]["content"])],
-                        [history_for_logging_to_log[0]],
+                        [history_for_logging_to_log[0][0]],
+                        [history_for_logging_to_log[0][1:]],
                         [rewards_to_log[0]],
                         self.state.global_step,
                     )
