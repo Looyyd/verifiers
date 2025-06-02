@@ -1311,13 +1311,21 @@ I need to analyze the current state and find the best path to the goal while avo
             and any(isinstance(p, list) for p in inputs["prompt_ids"])
         ):
             if DEBUG:
-                print(f"Inputs prompt_ids shape: {inputs['prompt_ids'].shape}")
-                print(f"Inputs completion_ids shape: {inputs['completion_ids'].shape}")
-                print(f"Inputs prompt_mask shape: {inputs['prompt_mask'].shape}")
                 print(
-                    f"Inputs completion_mask shape: {inputs['completion_mask'].shape}"
+                    f"Inputs prompt_ids shape: {get_nested_shape(inputs['prompt_ids'])}"
                 )
-                print(f"Inputs advantages shape: {inputs['advantages'].shape}")
+                print(
+                    f"Inputs completion_ids shape: {get_nested_shape(inputs['completion_ids'])}"
+                )
+                print(
+                    f"Inputs prompt_mask shape: {get_nested_shape(inputs['prompt_mask'])}"
+                )
+                print(
+                    f"Inputs completion_mask shape: {get_nested_shape(inputs['completion_mask'])}"
+                )
+                print(
+                    f"Inputs advantages shape: {get_nested_shape(inputs['advantages'])}"
+                )
 
             # Process each episode's segments
             total_loss = 0.0
@@ -1586,3 +1594,28 @@ I need to analyze the current state and find the best path to the goal while avo
         else:
             # Fall back to parent implementation for non-compression cases
             return super()._prepare_inputs(inputs)
+
+
+def get_nested_shape(lst):
+    """
+    Recursively get the shape of a nested list structure.
+
+    Args:
+        lst: A list or nested list structure
+
+    Returns:
+        A string representation of the nested shape
+    """
+    if not isinstance(lst, list):
+        return str(lst.shape) if hasattr(lst, "shape") else str(type(lst))
+
+    if not lst:
+        return "[]"
+
+    # Get shape of first element recursively
+    first_shape = get_nested_shape(lst[0])
+
+    # Get length of current level
+    current_len = len(lst)
+
+    return f"[{current_len}, {first_shape}]"
