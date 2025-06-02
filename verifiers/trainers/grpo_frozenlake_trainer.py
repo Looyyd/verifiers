@@ -1236,7 +1236,7 @@ I need to analyze the current state and find the best path to the goal while avo
                     table = {
                         "step": [str(self.state.global_step)] * len(rewards),
                         "prompt": prompts_to_log,
-                        "history_for_logging": history_for_logging_to_log,
+                        "history_for_logging": history_for_logging_to_log[0],
                         "reward": rewards.tolist(),
                     }
                     df = pd.DataFrame(table)
