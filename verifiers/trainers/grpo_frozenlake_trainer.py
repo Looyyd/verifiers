@@ -773,6 +773,10 @@ I need to analyze the current state and find the best path to the goal while avo
 
                 # Check if the model used think tags
                 has_think_tags = "</think>" in summary_text
+                if DEBUG:
+                    print("Compressing because is_compressing is True")
+                    print(f"has_think_tags: {has_think_tags}")
+                    print(f"summary_text: {summary_text}")
                 if has_think_tags:
                     # Extract content after </think>
                     summary_text = summary_text.split("</think>", 1)[1].strip()
@@ -841,6 +845,9 @@ I need to analyze the current state and find the best path to the goal while avo
 
                 # Reset prompt_ids for the new segment
                 state["prompt_ids"] = []  # Will be set on next LLM call
+
+                if DEBUG:
+                    print(f"State after compression: {state}")
 
                 # Don't increment steps for compression
                 return j, state
@@ -920,6 +927,7 @@ I need to analyze the current state and find the best path to the goal while avo
             state["steps"] += 1
 
             # Truncate if too long
+            # TODO: should this be done????? or just let it be handled by the trainer?
             if len(state["completion_ids"]) > sampling_params.max_tokens:
                 state["completed"] = True
                 # Truncate only the part after current segment start
