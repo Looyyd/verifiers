@@ -35,7 +35,7 @@ BATCH_SIZE = 16
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
 GAME_REWARD_WEIGHT = 10.0  # Weight for reaching the goal
-MAX_EPISODE_STEPS = 50  # Maximum steps per episode
+MAX_EPISODE_STEPS = 25  # Maximum steps per episode, should always be enough for 4x4 env
 
 # Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name)

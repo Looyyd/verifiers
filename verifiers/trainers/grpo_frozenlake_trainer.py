@@ -153,7 +153,7 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         n_initial_samples: int = 100,
         format_reward_weight: float = 1.0,
         game_reward_weight: float = 10.0,
-        max_episode_steps: int = 30,  # should alwyas be enough for 4x4 env # TODO: this could be handled by env, right now we count the steps which is not really needed?
+        max_episode_steps: int = 50,  # TODO: this could be handled by env, right now we count the steps which is not really needed?
         frozen_tile_probability: float = 0.8,
         # Context compression parameters
         use_context_compression: bool = True,
@@ -1215,7 +1215,6 @@ I need to analyze the current state and find the best path to the goal while avo
             self.log_completions
             and self.state.global_step % self.args.logging_steps == 0
         ):
-            prompts_to_log = gather_object(prompts)
             history_for_logging_to_log = gather_object(history_for_logging)
             rewards_to_log = rewards.tolist()
 
@@ -1227,20 +1226,7 @@ I need to analyze the current state and find the best path to the goal while avo
                         [rewards_to_log[0]],
                         self.state.global_step,
                     )
-                if (
-                    self.args.report_to
-                    and "wandb" in self.args.report_to
-                    and wandb.run is not None
-                ):
 
-                    table = {
-                        "step": [str(self.state.global_step)] * len(rewards),
-                        "prompt": prompts_to_log,
-                        "history_for_logging": history_for_logging_to_log[0],
-                        "reward": rewards.tolist(),
-                    }
-                    df = pd.DataFrame(table)
-                    wandb.log({"completions": wandb.Table(dataframe=df)})
 
         # Log compression-specific metrics
         if (
