@@ -648,6 +648,7 @@ I need to analyze the current state and find the best path to the goal while avo
             completion_messages = [
                 s["messages"][s["prompt_messages"] :] for s in states
             ]
+            history_for_logging = [s["history_for_logging"] for s in states]
             episode_outcomes = [s["episode_outcome"] for s in states]
             compression_info = [
                 {
@@ -668,9 +669,8 @@ I need to analyze the current state and find the best path to the goal while avo
                 "prompt_masks": all_prompt_masks,
                 "completion_ids": all_completion_ids,
                 "completion_masks": all_completion_masks,
-                "messages": [
-                    s["history_for_logging"] for s in states
-                ],  # Use history for logging
+                "messages": completion_messages,
+                "history_for_logging": history_for_logging,
                 "episode_outcomes": episode_outcomes,
                 "compression_info": compression_info,
                 "use_segments": True,  # Flag to indicate segmented data
@@ -680,6 +680,10 @@ I need to analyze the current state and find the best path to the goal while avo
             completion_ids = [s["completion_ids"] for s in states]
             completion_mask = [s["completion_mask"] for s in states]
             episode_outcomes = [s["episode_outcome"] for s in states]
+            completion_messages = [
+                s["messages"][s["prompt_messages"] :] for s in states
+            ]
+            history_for_logging = [s["history_for_logging"] for s in states]
 
             # Clean up environments
             for env_info in self._gym_envs.values():
@@ -689,9 +693,7 @@ I need to analyze the current state and find the best path to the goal while avo
 
             return {
                 "ids": completion_ids,
-                "messages": [
-                    s["history_for_logging"] for s in states
-                ],  # Use history for logging
+                "messages": completion_messages,
                 "mask": completion_mask,
                 "episode_outcomes": episode_outcomes,
             }
