@@ -1053,6 +1053,8 @@ I need to analyze the current state and find the best path to the goal while avo
             compression_info = [None] * len(all_prompts)
 
         # Broadcast all data
+        if DEBUG:
+            print(f"Completions messages before broadcast: {completion_messages}")
         prompt_ids_list = broadcast_object_list(prompt_ids_list, from_process=0)
         prompt_masks_list = broadcast_object_list(prompt_masks_list, from_process=0)
         completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
@@ -1062,6 +1064,8 @@ I need to analyze the current state and find the best path to the goal while avo
         completion_messages = broadcast_object_list(completion_messages, from_process=0)
         episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
         compression_info = broadcast_object_list(compression_info, from_process=0)
+        if DEBUG:
+            print(f"Completions messages after broadcast: {completion_messages}")
 
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
