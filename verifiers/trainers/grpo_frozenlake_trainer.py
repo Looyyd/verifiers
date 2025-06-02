@@ -153,7 +153,7 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         n_initial_samples: int = 100,
         format_reward_weight: float = 1.0,
         game_reward_weight: float = 10.0,
-        max_episode_steps: int = 50,
+        max_episode_steps: int = 30,  # should alwyas be enough for 4x4 env # TODO: this could be handled by env, right now we count the steps which is not really needed?
         frozen_tile_probability: float = 0.8,
         # Context compression parameters
         use_context_compression: bool = True,
