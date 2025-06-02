@@ -26,12 +26,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python verifiers/inference/vllm_serve.py --model  '
 CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file configs/zero3.yaml verifiers/examples/demo_frozenlake_train.py
 """
 
-model_name = "Qwen/Qwen2.5-7B-Instruct"
-# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_name = "Qwen/Qwen2.5-7B-Instruct"
+model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
 GAME_REWARD_WEIGHT = 10.0  # Weight for reaching the goal
@@ -73,7 +73,7 @@ training_args = GRPOConfig(
     # TODO: need to increase this for multi step reasoning. or implement a method to contract the prompt length.
     max_completion_length=2048,
     per_device_train_batch_size=BATCH_SIZE,
-    num_generations=16,
+    num_generations=4,
     gradient_accumulation_steps=1,
     gradient_checkpointing=True,
     save_strategy="steps",
