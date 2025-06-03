@@ -22,6 +22,7 @@ from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.imports import LLM, SamplingParams
 from verifiers.inference.vllm_client import VLLMClient
 from verifiers.envs.multiturn_env import dict_to_chat_response
+from verifiers.utils.nan_utils import nanmin, nanmax, nanstd
 
 
 # monkey patch vllm client
@@ -32,7 +33,7 @@ trl.extras.vllm_client.VLLMClient = VLLMClient
 from trl import GRPOTrainer, GRPOConfig
 from trl.data_utils import maybe_apply_chat_template
 from trl.import_utils import is_rich_available
-from trl.trainer.utils import pad, nanmin, nanmax, nanstd
+from trl.trainer.utils import pad
 
 if is_wandb_available():
     import wandb
@@ -829,31 +830,6 @@ summary here ...
 
             # Increment step counter
             state["steps"] += 1
-
-            # Truncate if too long
-            # TODO: should this be done????? or just let it be handled by the trainer?
-            # if len(state["completion_ids"]) > sampling_params.max_tokens:
-            #     state["completed"] = True
-            #     # Truncate only the part after current segment start
-            #     max_segment_tokens = (
-            #         sampling_params.max_tokens - state["current_segment_start"]
-            #     )
-            #     segment_ids = state["completion_ids"][state["current_segment_start"] :][
-            #         :max_segment_tokens
-            #     ]
-            #     segment_mask = state["completion_mask"][
-            #         state["current_segment_start"] :
-            #     ][:max_segment_tokens]
-
-            #     # Update the full arrays
-            #     state["completion_ids"] = (
-            #         state["completion_ids"][: state["current_segment_start"]]
-            #         + segment_ids
-            #     )
-            #     state["completion_mask"] = (
-            #         state["completion_mask"][: state["current_segment_start"]]
-            #         + segment_mask
-            #     )
 
             return j, state
 
