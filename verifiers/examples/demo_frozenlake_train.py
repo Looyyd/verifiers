@@ -58,7 +58,6 @@ training_args = GRPOConfig(
     lr_scheduler_type="constant",
     num_train_epochs=1,
     # Config recommended for Qwen 3 thinking, it's probably a good default for thinking tasks
-    # TODO: this is also defined in the sampling_params in the trainer, need to unify them, not sure which is actually used
     temperature=0.6,
     top_p=0.95,
     top_k=20,

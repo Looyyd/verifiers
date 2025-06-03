@@ -286,11 +286,10 @@ summary here ...
 
         self.sampling_params = SamplingParams(
             max_tokens=self.max_completion_length,
-            # Config recommended for Qwen 3 thinking, it's probably a good default for thinking tasks
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
-            min_p=0.0,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            min_p=args.min_p,
             repetition_penalty=self.repetition_penalty,
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
