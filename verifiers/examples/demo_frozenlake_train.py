@@ -102,7 +102,7 @@ trainer = GRPOFrozenLakeTrainer(
     format_reward_weight=FORMAT_REWARD_WEIGHT,
     game_reward_weight=GAME_REWARD_WEIGHT,
     max_episode_steps=MAX_EPISODE_STEPS,
-    compression_threshold=0.05,  # extremely low to debug compression
+    compression_threshold=0.75,
 )
 
 print(f"Starting FrozenLake GRPO training (slippery={IS_SLIPPERY})")

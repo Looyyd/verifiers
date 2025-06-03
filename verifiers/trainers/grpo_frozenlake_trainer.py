@@ -218,6 +218,7 @@ Possible moves are:
 2: RIGHT
 3: UP
 
+# Action response format
 You should think about your move first using <think></think> tags, then give your final answer.
 Put your final answer in \\boxed{}, for example \\boxed{0} for LEFT, \\boxed{1} for DOWN, etc.
 
@@ -226,7 +227,17 @@ Example format:
 I need to analyze the current state and find the best path to the goal while avoiding holes...
 </think>
 
-\\boxed{2}"""
+\\boxed{2}
+
+# Summarization format
+You might also be asked to summarize the conversation so far, in that case you should use the <think> tags to organize your thoughts and then use the <summary> tags to summarize the conversation.
+
+Example format:
+<think>
+I need to summarize the conversation so far...
+</think>
+summary here ...
+"""
 
         # Store gym environments indexed by a unique ID
         self._gym_envs = {}
