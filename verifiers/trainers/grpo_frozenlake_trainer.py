@@ -1489,28 +1489,3 @@ summary here ...
         else:
             # Fall back to parent implementation for non-compression cases
             return super()._prepare_inputs(inputs)
-
-
-def get_nested_shape(lst):
-    """
-    Recursively get the shape of a nested list structure.
-
-    Args:
-        lst: A list or nested list structure
-
-    Returns:
-        A string representation of the nested shape
-    """
-    if not isinstance(lst, list):
-        return str(lst.shape) if hasattr(lst, "shape") else str(type(lst))
-
-    if not lst:
-        return "[]"
-
-    # Get shape of first element recursively
-    first_shape = get_nested_shape(lst[0])
-
-    # Get length of current level
-    current_len = len(lst)
-
-    return f"[{current_len}, {first_shape}]"
