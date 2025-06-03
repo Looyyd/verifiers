@@ -1326,14 +1326,27 @@ summary here ...
 
             device = self.accelerator.device
 
-            # Step 1: Find max number of segments across all episodes
-            max_segments = max(
+            # Step 1: Find max number of segments across all episodes AND all processes
+            local_max_segments = max(
                 len(episode_segments) for episode_segments in inputs["prompt_ids"]
             )
             num_episodes = len(inputs["prompt_ids"])
 
+            # Gather max_segments across all processes to ensure consistency
+            local_max_tensor = torch.tensor(local_max_segments, device=device)
+            all_max_segments = self.accelerator.gather(local_max_tensor)
+            max_segments = all_max_segments.max().item()
+
             if DEBUG:
-                print(f"Max segments: {max_segments}, Num episodes: {num_episodes}")
+                print(
+                    f"Rank {self.accelerator.process_index}: Local max segments: {local_max_segments}"
+                )
+                print(
+                    f"Rank {self.accelerator.process_index}: Global max segments: {max_segments}"
+                )
+                print(
+                    f"Rank {self.accelerator.process_index}: Num episodes: {num_episodes}"
+                )
 
             # Step 2: Pad all episodes to have max_segments segments
             padded_episodes = self._pad_episodes_to_max_segments(inputs, max_segments)
