@@ -1,5 +1,7 @@
 from trl import GRPOConfig
 from transformers import AutoTokenizer
+import bitsandbytes as bnb
+
 
 # Import our new trainer
 from verifiers.trainers.grpo_frozenlake_trainer import GRPOFrozenLakeTrainer
@@ -52,8 +54,6 @@ run_name = (
 training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
-    # Trying to save vram with 8bit optimizer, TODO: remove if unstable training
-    optim="paged_adamw_8bit",
     learning_rate=1e-6,
     lr_scheduler_type="constant",
     num_train_epochs=1,
@@ -101,6 +101,11 @@ trainer = GRPOFrozenLakeTrainer(
     game_reward_weight=GAME_REWARD_WEIGHT,
     max_episode_steps=MAX_EPISODE_STEPS,
     compression_threshold=0.05,  # TODO: minimal for debugging
+    # Trying to save vram with 8bit optimizer, TODO: remove if unstable training
+    optimizers=(
+        bnb.optim.Adam8bit,
+        None,
+    ),
 )
 
 print(f"Starting FrozenLake GRPO training (slippery={IS_SLIPPERY})")
