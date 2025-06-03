@@ -914,89 +914,134 @@ summary here ...
         episode_outcomes = episode_outcomes[process_slice]
         compression_info = compression_info[process_slice]
 
-        # NEW: Precompute old_per_token_logps and ref_per_token_logps for each segment
+        # Count total segments across all episodes locally
+        local_segment_count = sum(
+            len(prompt_ids_list[ep]) for ep in range(len(prompt_ids_list))
+        )
+
+        # Find global max segments
+        local_count_tensor = torch.tensor(local_segment_count, device=device)
+        all_counts = self.accelerator.gather(local_count_tensor)
+        max_segment_count = all_counts.max().item()
+
+        # Now process segments with synchronized forward passes
+        segment_idx_global = 0
         old_per_token_logps_list = []
         ref_per_token_logps_list = []
 
-        # Process each episode
         for episode_idx in range(len(prompt_ids_list)):
             episode_old_logps = []
             episode_ref_logps = []
 
-            # Process each segment in the episode
             for segment_idx in range(len(prompt_ids_list[episode_idx])):
-                prompt_ids_segment = torch.tensor(
-                    prompt_ids_list[episode_idx][segment_idx], device=device
-                )
-                prompt_mask_segment = torch.tensor(
-                    prompt_masks_list[episode_idx][segment_idx], device=device
-                )
-                completion_ids_segment = torch.tensor(
-                    completion_ids_list[episode_idx][segment_idx], device=device
-                )
-                completion_mask_segment = torch.tensor(
-                    completion_masks_list[episode_idx][segment_idx], device=device
-                )
+                # Process real segment
+                if segment_idx_global < local_segment_count:
+                    prompt_ids_segment = torch.tensor(
+                        prompt_ids_list[episode_idx][segment_idx], device=device
+                    )
+                    prompt_mask_segment = torch.tensor(
+                        prompt_masks_list[episode_idx][segment_idx], device=device
+                    )
+                    completion_ids_segment = torch.tensor(
+                        completion_ids_list[episode_idx][segment_idx], device=device
+                    )
+                    completion_mask_segment = torch.tensor(
+                        completion_masks_list[episode_idx][segment_idx], device=device
+                    )
 
-                # Skip empty completions
-                if len(completion_ids_list[episode_idx][segment_idx]) == 0:
-                    episode_old_logps.append([])
-                    episode_ref_logps.append([])
-                    continue
+                    # Skip empty completions
+                    if len(completion_ids_list[episode_idx][segment_idx]) == 0:
+                        episode_old_logps.append([])
+                        episode_ref_logps.append([])
+                        segment_idx_global += 1
+                        continue
 
-                # Concatenate for this segment
-                input_ids_segment = torch.cat(
-                    [prompt_ids_segment.unsqueeze(0), completion_ids_segment.unsqueeze(0)],
-                    dim=1,
-                )
-                attention_mask_segment = torch.cat(
-                    [
-                        prompt_mask_segment.unsqueeze(0),
-                        completion_mask_segment.unsqueeze(0),
-                    ],
-                    dim=1,
-                )
-                logits_to_keep = completion_ids_segment.size(0)
+                    # Concatenate for this segment
+                    input_ids_segment = torch.cat(
+                        [
+                            prompt_ids_segment.unsqueeze(0),
+                            completion_ids_segment.unsqueeze(0),
+                        ],
+                        dim=1,
+                    )
+                    attention_mask_segment = torch.cat(
+                        [
+                            prompt_mask_segment.unsqueeze(0),
+                            completion_mask_segment.unsqueeze(0),
+                        ],
+                        dim=1,
+                    )
+                    logits_to_keep = completion_ids_segment.size(0)
 
-                with torch.no_grad():
-                    # Compute old log probs (if num_iterations > 1)
-                    if self.num_iterations > 1:
-                        old_logps = self._get_per_token_logps(
-                            self.model,
-                            input_ids_segment,
-                            attention_mask_segment,
-                            logits_to_keep,
-                        )
-                        episode_old_logps.append(old_logps.squeeze(0).cpu().tolist())
-                    else:
-                        # Will use per_token_logps.detach() in _compute_loss
-                        episode_old_logps.append(None)
-
-                    # Compute ref log probs (if beta > 0)
-                    if self.beta != 0.0:
-                        if self.ref_model is not None:
-                            ref_logps = self._get_per_token_logps(
-                                self.ref_model,
+                    with torch.no_grad():
+                        # Compute old log probs (if num_iterations > 1)
+                        if self.num_iterations > 1:
+                            old_logps = self._get_per_token_logps(
+                                self.model,
                                 input_ids_segment,
                                 attention_mask_segment,
                                 logits_to_keep,
                             )
+                            episode_old_logps.append(
+                                old_logps.squeeze(0).cpu().tolist()
+                            )
                         else:
-                            with self.accelerator.unwrap_model(
-                                self.model
-                            ).disable_adapter():
+                            # Will use per_token_logps.detach() in _compute_loss
+                            episode_old_logps.append(None)
+
+                        # Compute ref log probs (if beta > 0)
+                        if self.beta != 0.0:
+                            if self.ref_model is not None:
                                 ref_logps = self._get_per_token_logps(
-                                    self.model,
+                                    self.ref_model,
                                     input_ids_segment,
                                     attention_mask_segment,
                                     logits_to_keep,
                                 )
-                        episode_ref_logps.append(ref_logps.squeeze(0).cpu().tolist())
-                    else:
-                        episode_ref_logps.append(None)
+                            else:
+                                with self.accelerator.unwrap_model(
+                                    self.model
+                                ).disable_adapter():
+                                    ref_logps = self._get_per_token_logps(
+                                        self.model,
+                                        input_ids_segment,
+                                        attention_mask_segment,
+                                        logits_to_keep,
+                                    )
+                            episode_ref_logps.append(
+                                ref_logps.squeeze(0).cpu().tolist()
+                            )
+                        else:
+                            episode_ref_logps.append(None)
+                segment_idx_global += 1
 
             old_per_token_logps_list.append(episode_old_logps)
             ref_per_token_logps_list.append(episode_ref_logps)
+
+        # CRITICAL: Process dummy segments to match global max
+        while segment_idx_global < max_segment_count:
+            # Create dummy tensors for forward pass
+            dummy_input = torch.zeros(1, 10, device=device, dtype=torch.long)
+            dummy_mask = torch.ones(1, 10, device=device, dtype=torch.long)
+
+            with torch.no_grad():
+                if self.num_iterations > 1:
+                    _ = self._get_per_token_logps(
+                        self.model, dummy_input, dummy_mask, 5
+                    )
+                if self.beta != 0.0:
+                    if self.ref_model is not None:
+                        _ = self._get_per_token_logps(
+                            self.ref_model, dummy_input, dummy_mask, 5
+                        )
+                    else:
+                        with self.accelerator.unwrap_model(
+                            self.model
+                        ).disable_adapter():
+                            _ = self._get_per_token_logps(
+                                self.model, dummy_input, dummy_mask, 5
+                            )
+            segment_idx_global += 1
 
         # Compute rewards
         completions = completion_messages
@@ -1145,7 +1190,7 @@ summary here ...
         """Override to handle context compression with multiple conversation segments."""
 
         device = self.accelerator.device
-        
+
         if DEBUG:
             rank = self.accelerator.process_index
             print(f"[Rank {rank}] Starting _compute_loss on device {device}")
@@ -1163,9 +1208,15 @@ summary here ...
         valid_segment_mask = []  # Track which segments are real vs padding
 
         # Check if we have precomputed logps
-        has_old_logps = inputs.get("old_per_token_logps") is not None and inputs["old_per_token_logps"]
-        has_ref_logps = inputs.get("ref_per_token_logps") is not None and inputs["ref_per_token_logps"]
-        
+        has_old_logps = (
+            inputs.get("old_per_token_logps") is not None
+            and inputs["old_per_token_logps"]
+        )
+        has_ref_logps = (
+            inputs.get("ref_per_token_logps") is not None
+            and inputs["ref_per_token_logps"]
+        )
+
         if DEBUG:
             print(f"[Rank {rank}] Has precomputed old_logps: {has_old_logps}")
             print(f"[Rank {rank}] Has precomputed ref_logps: {has_ref_logps}")
@@ -1190,13 +1241,21 @@ summary here ...
                     )
                     all_advantages.append(episode_advantage)
                     valid_segment_mask.append(True)
-                    
+
                     # NEW: Collect precomputed logps if available
-                    if has_old_logps and inputs["old_per_token_logps"][episode_idx][segment_idx] is not None:
+                    if (
+                        has_old_logps
+                        and inputs["old_per_token_logps"][episode_idx][segment_idx]
+                        is not None
+                    ):
                         all_old_per_token_logps.append(
                             inputs["old_per_token_logps"][episode_idx][segment_idx]
                         )
-                    if has_ref_logps and inputs["ref_per_token_logps"][episode_idx][segment_idx] is not None:
+                    if (
+                        has_ref_logps
+                        and inputs["ref_per_token_logps"][episode_idx][segment_idx]
+                        is not None
+                    ):
                         all_ref_per_token_logps.append(
                             inputs["ref_per_token_logps"][episode_idx][segment_idx]
                         )
@@ -1220,7 +1279,7 @@ summary here ...
             all_completion_masks.append([0])
             all_advantages.append(0.0)
             valid_segment_mask.append(False)
-            
+
             # NEW: Pad precomputed logps with zeros (matching the length of dummy completion)
             if has_old_logps and all_old_per_token_logps:
                 # For dummy segments, add a single zero since completion has 1 token
@@ -1252,11 +1311,11 @@ summary here ...
         valid_segment_mask = torch.tensor(
             valid_segment_mask, dtype=torch.bool, device=device
         )
-        
+
         # NEW: Process precomputed logps
         if has_old_logps and all_old_per_token_logps:
             old_per_token_logps = [
-                torch.tensor(logps, device=device, dtype=torch.float32) 
+                torch.tensor(logps, device=device, dtype=torch.float32)
                 for logps in all_old_per_token_logps
             ]
             old_per_token_logps = pad(old_per_token_logps, padding_value=0.0)
@@ -1267,19 +1326,21 @@ summary here ...
                 current_len = old_per_token_logps.shape[1]
                 if current_len < target_len:
                     padding = torch.zeros(
-                        old_per_token_logps.shape[0], 
-                        target_len - current_len, 
-                        device=device
+                        old_per_token_logps.shape[0],
+                        target_len - current_len,
+                        device=device,
                     )
-                    old_per_token_logps = torch.cat([old_per_token_logps, padding], dim=1)
+                    old_per_token_logps = torch.cat(
+                        [old_per_token_logps, padding], dim=1
+                    )
                 else:
                     old_per_token_logps = old_per_token_logps[:, :target_len]
         else:
             old_per_token_logps = None
-        
+
         if has_ref_logps and all_ref_per_token_logps:
             ref_per_token_logps = [
-                torch.tensor(logps, device=device, dtype=torch.float32) 
+                torch.tensor(logps, device=device, dtype=torch.float32)
                 for logps in all_ref_per_token_logps
             ]
             ref_per_token_logps = pad(ref_per_token_logps, padding_value=0.0)
@@ -1290,11 +1351,13 @@ summary here ...
                 current_len = ref_per_token_logps.shape[1]
                 if current_len < target_len:
                     padding = torch.zeros(
-                        ref_per_token_logps.shape[0], 
-                        target_len - current_len, 
-                        device=device
+                        ref_per_token_logps.shape[0],
+                        target_len - current_len,
+                        device=device,
                     )
-                    ref_per_token_logps = torch.cat([ref_per_token_logps, padding], dim=1)
+                    ref_per_token_logps = torch.cat(
+                        [ref_per_token_logps, padding], dim=1
+                    )
                 else:
                     ref_per_token_logps = ref_per_token_logps[:, :target_len]
         else:
@@ -1315,7 +1378,9 @@ summary here ...
             with torch.no_grad():
                 if self.num_iterations > 1:
                     if DEBUG:
-                        print(f"[Rank {rank}] Computing old log probs (not precomputed)")
+                        print(
+                            f"[Rank {rank}] Computing old log probs (not precomputed)"
+                        )
                     old_per_token_logps = self._get_per_token_logps(
                         self.model, input_ids, attention_mask, logits_to_keep
                     )
@@ -1332,19 +1397,23 @@ summary here ...
                 with torch.no_grad():
                     if self.ref_model is not None:
                         if DEBUG:
-                            print(f"[Rank {rank}] Computing ref log probs (not precomputed)")
+                            print(
+                                f"[Rank {rank}] Computing ref log probs (not precomputed)"
+                            )
                         ref_per_token_logps = self._get_per_token_logps(
                             self.ref_model, input_ids, attention_mask, logits_to_keep
                         )
                     else:
-                        with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        with self.accelerator.unwrap_model(
+                            self.model
+                        ).disable_adapter():
                             ref_per_token_logps = self._get_per_token_logps(
                                 self.model, input_ids, attention_mask, logits_to_keep
                             )
             else:
                 if DEBUG:
                     print(f"[Rank {rank}] Using precomputed ref log probs")
-            
+
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps)
                 - (ref_per_token_logps - per_token_logps)
