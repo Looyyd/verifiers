@@ -52,20 +52,6 @@ DEFAULT_GRID_DISTRIBUTION = {
 }
 
 
-def generate_random_frozenlake_map(size: int, p: float = 0.8) -> List[str]:
-    """
-    Generate a random FrozenLake map of specified size.
-
-    Args:
-        size: Size of the grid (e.g., 2 for 2x2, 3 for 3x3, etc.)
-        p: Probability of a frozen tile (vs hole)
-
-    Returns:
-        List of strings representing the map
-    """
-    return generate_random_map(size=size, p=p)
-
-
 class GRPOFrozenLakeTrainer(GRPOTrainer):
     """
     A GRPO trainer specifically for FrozenLake environment.
@@ -74,16 +60,7 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
     This trainer extends GRPOTrainer with:
     - Multi-turn FrozenLake environment interaction
     - Custom reward functions for format compliance and game success
-    - Optional context compression for long episodes
-
-    Context Compression:
-    When enabled, the trainer will prompt the model to summarize the conversation
-    when it reaches a token threshold. This allows for training on longer episodes
-    without exceeding context limits. The model learns to generate effective
-    summaries that preserve important information.
-
-    Example usage with context compression:
-
+    - Context compression for long episodes
     """
 
     def __init__(
@@ -258,7 +235,7 @@ summary here ...
             grid_size = self._sample_grid_size()
 
             # Generate a random map for this size
-            map_desc = generate_random_frozenlake_map(
+            map_desc = generate_random_map(
                 size=grid_size, p=self.frozen_tile_probability
             )
 
@@ -408,17 +385,9 @@ summary here ...
         rewards = []
         # Get episode outcomes from kwargs if available
         episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
-        compression_info = kwargs.get("compression_info", [{}] * len(completions))
 
-        for outcome, comp_info in zip(episode_outcomes, compression_info):
-            base_reward = 1.0 if outcome == "goal_reached" else 0.0
-
-            # Optional: small penalty for needing compression (can be disabled by setting to 1.0)
-            compression_penalty = 1.0  # 5% penalty for needing compression
-            if comp_info.get("needed_compression", False) and compression_penalty < 1.0:
-                base_reward *= compression_penalty
-
-            rewards.append(base_reward)
+        for outcome in episode_outcomes:
+            rewards.append(1.0 if outcome == "goal_reached" else 0.0)
 
         return rewards
 
@@ -438,7 +407,7 @@ summary here ...
             env_id = self._next_env_id
             self._next_env_id += 1
 
-            # Create new gym environment with custom map if provided
+            # Generate with the stored map descriptions
             if map_descs and i < len(map_descs):
                 gym_env = gym.make(
                     "FrozenLake-v1",
@@ -446,14 +415,8 @@ summary here ...
                     is_slippery=self.is_slippery,
                 )
             else:
-                # Fallback to random 4x4 map
-                gym_env = gym.make(
-                    "FrozenLake-v1",
-                    desc=generate_random_frozenlake_map(
-                        4, self.frozen_tile_probability
-                    ),
-                    is_slippery=self.is_slippery,
-                )
+                raise ValueError("No map description provided")
+
             initial_state, _ = gym_env.reset()
             grid = self._get_grid_from_env(gym_env)
 
@@ -528,28 +491,16 @@ summary here ...
                         )
                     else:
                         # This shouldn't happen
-                        print(f"WARNING: Missing data for segment creation")
-                        print(
-                            f"  segment_completion_ids: {len(segment_completion_ids) if segment_completion_ids else 'None'}"
+                        raise RuntimeError(
+                            f"WARNING: Missing data for segment creation"
                         )
-                        print(
-                            f"  segment_prompt_ids: {len(segment_prompt_ids) if segment_prompt_ids else 'None'}"
-                        )
-                        print(
-                            f"  current_segment_start: {state['current_segment_start']}"
-                        )
-                        print(f"  len(completion_ids): {len(state['completion_ids'])}")
+
                 else:
-                    # Debug why we might not have segments
-                    if len(state["completion_ids"]) == 0:
-                        print(
-                            f"WARNING: Episode completed with no completion_ids at all"
-                        )
-                        print(
-                            f"  episode_outcome: {state.get('episode_outcome', 'Unknown')}"
-                        )
-                        print(f"  steps: {state.get('steps', 0)}")
-                        print(f"  messages: {len(state.get('messages', []))}")
+                    raise RuntimeError(
+                        f"WARNING: Episode completed with no segments captured. "
+                        f"completion_ids length: {len(state['completion_ids'])}, "
+                        f"current_segment_start: {state['current_segment_start']}"
+                    )
 
         # Extract results with conversation segments
         if self.use_context_compression:
@@ -1291,11 +1242,6 @@ summary here ...
             local_num_tensor = torch.tensor(local_num_segments, device=device)
             all_num_segments = self.accelerator.gather(local_num_tensor)
             max_num_segments = all_num_segments.max().item()
-
-            if DEBUG:
-                print(
-                    f"Rank {self.accelerator.process_index}: Local segments: {local_num_segments}, Global max: {max_num_segments}"
-                )
 
             # If no segments on any GPU, return zero loss
             if max_num_segments == 0:
