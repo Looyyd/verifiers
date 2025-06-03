@@ -230,7 +230,8 @@ I need to analyze the current state and find the best path to the goal while avo
 \\boxed{2}
 
 # Summarization format
-You might also be asked to summarize the conversation so far, in that case you should use the <think> tags to organize your thoughts and then use the <summary> tags to summarize the conversation.
+You might also be asked to summarize the conversation so far.
+In that case you should use the <think> tags to organize your thoughts, then put the summary outside the <think> tags.
 
 Example format:
 <think>
