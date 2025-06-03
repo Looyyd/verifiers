@@ -27,11 +27,12 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file c
 """
 
 # model_name = "Qwen/Qwen2.5-7B-Instruct"
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 NUM_GENERATIONS = BATCH_SIZE
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
@@ -68,11 +69,10 @@ training_args = GRPOConfig(
     num_iterations=1,
     # KL penalty coefficient, default is 0.04, other demos in this repo use lower kl,
     # some people online used smaller kl also https://x.com/abacaj/status/1886497011618197748
-    # TODO: figure out if this works well
     beta=0.001,
     max_prompt_length=512,
-    # TODO: need to increase this for multi step reasoning. or implement a method to contract the prompt length.
     max_completion_length=2048,
+    compression_threshold=0.05,  # TODO: minimal for debugging
     per_device_train_batch_size=BATCH_SIZE,
     num_generations=NUM_GENERATIONS,
     gradient_accumulation_steps=1,
