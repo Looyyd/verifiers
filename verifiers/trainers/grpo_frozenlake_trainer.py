@@ -43,7 +43,7 @@ import gymnasium as gym
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
-DEBUG = False
+DEBUG = True
 MAX_COMPRESSIONS = 3
 
 # Grid distribution configuration
@@ -1085,6 +1085,12 @@ summary here ...
         """Override to handle context compression with multiple conversation segments."""
 
         device = self.accelerator.device
+        
+        if DEBUG:
+            rank = self.accelerator.process_index
+            print(f"[Rank {rank}] Starting _compute_loss on device {device}")
+            print(f"[Rank {rank}] Input keys: {inputs.keys()}")
+            print(f"[Rank {rank}] Number of episodes: {len(inputs['prompt_ids'])}")
 
         # Step 1: Flatten all segments locally
         all_prompt_ids = []
@@ -1096,10 +1102,17 @@ summary here ...
 
         for episode_idx in range(len(inputs["prompt_ids"])):
             episode_advantage = inputs["advantages"][episode_idx]
+            
+            if DEBUG:
+                print(f"[Rank {rank}] Episode {episode_idx}: advantage = {episode_advantage}")
+                print(f"[Rank {rank}] Episode {episode_idx}: num segments = {len(inputs['prompt_ids'][episode_idx])}")
 
             for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
                 # Check if segment has completion tokens
                 if len(inputs["completion_ids"][episode_idx][segment_idx]) > 0:
+                    if DEBUG:
+                        print(f"[Rank {rank}] Episode {episode_idx}, Segment {segment_idx}: Valid segment with {len(inputs['completion_ids'][episode_idx][segment_idx])} completion tokens")
+                    
                     all_prompt_ids.append(
                         inputs["prompt_ids"][episode_idx][segment_idx]
                     )
@@ -1114,18 +1127,42 @@ summary here ...
                     )
                     all_advantages.append(episode_advantage)
                     valid_segment_mask.append(True)
+                else:
+                    if DEBUG:
+                        print(f"[Rank {rank}] Episode {episode_idx}, Segment {segment_idx}: Empty completion, skipping")
 
         # Step 2: Find global max number of segments
         local_num_segments = len(all_prompt_ids)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Local number of valid segments: {local_num_segments}")
+            print(f"[Rank {rank}] Valid segment mask length: {len(valid_segment_mask)}")
+        
         local_num_tensor = torch.tensor(local_num_segments, device=device)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Before gather: local_num_tensor = {local_num_tensor}")
+        
         all_num_segments = self.accelerator.gather(local_num_tensor)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] After gather: all_num_segments = {all_num_segments}")
+        
         max_num_segments = all_num_segments.max().item()
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Global max_num_segments: {max_num_segments}")
 
         # If no segments on any GPU, return zero loss
         if max_num_segments == 0:
+            if DEBUG:
+                print(f"[Rank {rank}] WARNING: max_num_segments is 0, returning zero loss")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         # Step 3: Pad to global max segments
+        if DEBUG:
+            print(f"[Rank {rank}] Padding from {len(all_prompt_ids)} to {max_num_segments} segments")
+        
         while len(all_prompt_ids) < max_num_segments:
             # Add dummy segments
             all_prompt_ids.append([self.processing_class.pad_token_id])
@@ -1134,8 +1171,17 @@ summary here ...
             all_completion_masks.append([0])
             all_advantages.append(0.0)
             valid_segment_mask.append(False)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] After padding: num segments = {len(all_prompt_ids)}")
+            print(f"[Rank {rank}] Valid segments: {sum(valid_segment_mask)} / {len(valid_segment_mask)}")
 
         # Step 4: Convert to padded tensors
+        if DEBUG:
+            print(f"[Rank {rank}] Converting to padded tensors...")
+            for i in range(min(3, len(all_prompt_ids))):
+                print(f"[Rank {rank}] Segment {i} prompt length: {len(all_prompt_ids[i])}, completion length: {len(all_completion_ids[i])}")
+        
         prompt_ids = [torch.tensor(ids, device=device) for ids in all_prompt_ids]
         prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id)
 
@@ -1158,61 +1204,126 @@ summary here ...
         valid_segment_mask = torch.tensor(
             valid_segment_mask, dtype=torch.bool, device=device
         )
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Tensor shapes after padding:")
+            print(f"[Rank {rank}]   prompt_ids: {prompt_ids.shape}")
+            print(f"[Rank {rank}]   completion_ids: {completion_ids.shape}")
+            print(f"[Rank {rank}]   advantages: {advantages.shape}")
+            print(f"[Rank {rank}]   valid_segment_mask: {valid_segment_mask.shape}, sum: {valid_segment_mask.sum().item()}")
 
         # Concatenate prompt and completion
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         logits_to_keep = completion_ids.size(1)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Concatenated shapes:")
+            print(f"[Rank {rank}]   input_ids: {input_ids.shape}")
+            print(f"[Rank {rank}]   attention_mask: {attention_mask.shape}")
+            print(f"[Rank {rank}]   logits_to_keep: {logits_to_keep}")
 
         # Compute per-token log probabilities
+        if DEBUG:
+            print(f"[Rank {rank}] Computing per-token log probs...")
+        
         per_token_logps = self._get_per_token_logps(
             model, input_ids, attention_mask, logits_to_keep
         )
+        
+        if DEBUG:
+            print(f"[Rank {rank}] per_token_logps shape: {per_token_logps.shape}")
+            print(f"[Rank {rank}] per_token_logps min/max: {per_token_logps.min().item():.4f} / {per_token_logps.max().item():.4f}")
 
         # Compute old log probs
         with torch.no_grad():
             if self.num_iterations > 1:
+                if DEBUG:
+                    print(f"[Rank {rank}] Computing old log probs (num_iterations={self.num_iterations})...")
+                
                 old_per_token_logps = self._get_per_token_logps(
                     self.model, input_ids, attention_mask, logits_to_keep
                 )
             else:
+                if DEBUG:
+                    print(f"[Rank {rank}] First iteration, using detached current log probs")
+                
                 old_per_token_logps = per_token_logps.detach()
+        
+        if DEBUG:
+            print(f"[Rank {rank}] old_per_token_logps shape: {old_per_token_logps.shape}")
 
         # Compute KL divergence if needed
         if self.beta != 0.0:
+            if DEBUG:
+                print(f"[Rank {rank}] Computing KL divergence (beta={self.beta})...")
+            
             with torch.no_grad():
                 if self.ref_model is not None:
+                    if DEBUG:
+                        print(f"[Rank {rank}] Using separate ref_model")
+                    
                     ref_per_token_logps = self._get_per_token_logps(
                         self.ref_model, input_ids, attention_mask, logits_to_keep
                     )
                 else:
+                    if DEBUG:
+                        print(f"[Rank {rank}] Using model with disabled adapter as ref")
+                    
                     with self.accelerator.unwrap_model(self.model).disable_adapter():
                         ref_per_token_logps = self._get_per_token_logps(
                             self.model, input_ids, attention_mask, logits_to_keep
                         )
+            
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps)
                 - (ref_per_token_logps - per_token_logps)
                 - 1
             )
+            
+            if DEBUG:
+                print(f"[Rank {rank}] per_token_kl shape: {per_token_kl.shape}")
+                print(f"[Rank {rank}] per_token_kl min/max: {per_token_kl.min().item():.4f} / {per_token_kl.max().item():.4f}")
 
         # Compute GRPO loss
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Loss computation:")
+            print(f"[Rank {rank}]   epsilon_low: {self.epsilon_low}, epsilon_high: {self.epsilon_high}")
+            print(f"[Rank {rank}]   coef_1 min/max: {coef_1.min().item():.4f} / {coef_1.max().item():.4f}")
+            print(f"[Rank {rank}]   coef_2 min/max: {coef_2.min().item():.4f} / {coef_2.max().item():.4f}")
 
         per_token_loss1 = coef_1 * advantages.unsqueeze(1)
         per_token_loss2 = coef_2 * advantages.unsqueeze(1)
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        
+        if DEBUG:
+            print(f"[Rank {rank}] per_token_loss shape: {per_token_loss.shape}")
+            print(f"[Rank {rank}] per_token_loss min/max: {per_token_loss.min().item():.4f} / {per_token_loss.max().item():.4f}")
 
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
+            
+            if DEBUG:
+                print(f"[Rank {rank}] Added KL penalty, new per_token_loss min/max: {per_token_loss.min().item():.4f} / {per_token_loss.max().item():.4f}")
 
         # Apply valid segment mask to exclude padding from loss
         # Expand valid_segment_mask to match token dimension
         valid_mask_expanded = valid_segment_mask.unsqueeze(1).expand_as(completion_mask)
         masked_completion_mask = completion_mask * valid_mask_expanded
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Masking:")
+            print(f"[Rank {rank}]   completion_mask sum: {completion_mask.sum().item()}")
+            print(f"[Rank {rank}]   masked_completion_mask sum: {masked_completion_mask.sum().item()}")
+            print(f"[Rank {rank}]   valid_mask_expanded shape: {valid_mask_expanded.shape}")
 
         # Compute final loss based on loss type
+        if DEBUG:
+            print(f"[Rank {rank}] Computing final loss (loss_type={self.loss_type})...")
+        
         if self.loss_type == "grpo":
             loss = (
                 (per_token_loss * completion_mask).sum(-1)
@@ -1228,16 +1339,31 @@ summary here ...
             )
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Final loss: {loss.item():.6f}")
 
         # Log metrics (only for valid segments)
         mode = "eval" if self.control.should_evaluate else "train"
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Logging metrics (mode={mode})...")
 
         if self.beta != 0.0 and masked_completion_mask.sum() > 0:
             mean_kl = (
                 per_token_kl * masked_completion_mask
             ).sum() / masked_completion_mask.sum()
+            
+            if DEBUG:
+                print(f"[Rank {rank}] Before KL gather: mean_kl = {mean_kl.item():.4f}")
+            
+            gathered_kl = self.accelerator.gather_for_metrics(mean_kl)
+            
+            if DEBUG:
+                print(f"[Rank {rank}] After KL gather: gathered_kl shape = {gathered_kl.shape}")
+            
             self._metrics[mode]["kl"].append(
-                self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
+                gathered_kl.nanmean().item()
             )
 
         # Compute clipping metrics (only for valid segments)
@@ -1259,6 +1385,12 @@ summary here ...
             clip_ratio = (
                 is_region_clipped * masked_completion_mask
             ).sum() / masked_completion_mask.sum()
+            
+            if DEBUG:
+                print(f"[Rank {rank}] Clipping metrics before gather:")
+                print(f"[Rank {rank}]   low_clip: {low_clip.item():.4f}")
+                print(f"[Rank {rank}]   high_clip: {high_clip.item():.4f}")
+                print(f"[Rank {rank}]   clip_ratio: {clip_ratio.item():.4f}")
 
             gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
             self._metrics[mode]["clip_ratio/low_mean"].append(
@@ -1280,6 +1412,16 @@ summary here ...
             self._metrics[mode]["clip_ratio/region_mean"].append(
                 gathered_clip_ratio.nanmean().item()
             )
+            
+            if DEBUG:
+                print(f"[Rank {rank}] After all gather operations completed")
+        else:
+            if DEBUG:
+                print(f"[Rank {rank}] WARNING: masked_completion_mask.sum() = 0, skipping clipping metrics")
+        
+        if DEBUG:
+            print(f"[Rank {rank}] Returning loss: {loss.item():.6f}")
+            print(f"[Rank {rank}] =================================")
 
         return loss
 
