@@ -1307,355 +1307,222 @@ summary here ...
             and isinstance(inputs["prompt_ids"], list)
             and any(isinstance(p, list) for p in inputs["prompt_ids"])
         ):
-            if DEBUG:
-                print(
-                    f"Inputs prompt_ids shape: {get_nested_shape(inputs['prompt_ids'])}"
-                )
-                print(
-                    f"Inputs completion_ids shape: {get_nested_shape(inputs['completion_ids'])}"
-                )
-                print(
-                    f"Inputs prompt_mask shape: {get_nested_shape(inputs['prompt_mask'])}"
-                )
-                print(
-                    f"Inputs completion_mask shape: {get_nested_shape(inputs['completion_mask'])}"
-                )
-                print(
-                    f"Inputs advantages shape: {get_nested_shape(inputs['advantages'])}"
-                )
-
             device = self.accelerator.device
 
-            # Step 1: Find max number of segments across all episodes AND all processes
-            local_max_segments = max(
-                len(episode_segments) for episode_segments in inputs["prompt_ids"]
-            )
-            num_episodes = len(inputs["prompt_ids"])
+            # Step 1: Flatten all segments locally
+            all_prompt_ids = []
+            all_prompt_masks = []
+            all_completion_ids = []
+            all_completion_masks = []
+            all_advantages = []
+            valid_segment_mask = []  # Track which segments are real vs padding
 
-            # Gather max_segments across all processes to ensure consistency
-            local_max_tensor = torch.tensor(local_max_segments, device=device)
-            all_max_segments = self.accelerator.gather(local_max_tensor)
-            max_segments = all_max_segments.max().item()
+            for episode_idx in range(len(inputs["prompt_ids"])):
+                episode_advantage = inputs["advantages"][episode_idx]
+
+                for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
+                    # Check if segment has completion tokens
+                    if len(inputs["completion_ids"][episode_idx][segment_idx]) > 0:
+                        all_prompt_ids.append(
+                            inputs["prompt_ids"][episode_idx][segment_idx]
+                        )
+                        all_prompt_masks.append(
+                            inputs["prompt_mask"][episode_idx][segment_idx]
+                        )
+                        all_completion_ids.append(
+                            inputs["completion_ids"][episode_idx][segment_idx]
+                        )
+                        all_completion_masks.append(
+                            inputs["completion_mask"][episode_idx][segment_idx]
+                        )
+                        all_advantages.append(episode_advantage)
+                        valid_segment_mask.append(True)
+
+            # Step 2: Find global max number of segments
+            local_num_segments = len(all_prompt_ids)
+            local_num_tensor = torch.tensor(local_num_segments, device=device)
+            all_num_segments = self.accelerator.gather(local_num_tensor)
+            max_num_segments = all_num_segments.max().item()
 
             if DEBUG:
                 print(
-                    f"Rank {self.accelerator.process_index}: Local max segments: {local_max_segments}"
-                )
-                print(
-                    f"Rank {self.accelerator.process_index}: Global max segments: {max_segments}"
-                )
-                print(
-                    f"Rank {self.accelerator.process_index}: Num episodes: {num_episodes}"
+                    f"Rank {self.accelerator.process_index}: Local segments: {local_num_segments}, Global max: {max_num_segments}"
                 )
 
-            # Step 2: Pad all episodes to have max_segments segments
-            padded_episodes = self._pad_episodes_to_max_segments(inputs, max_segments)
-
-            # Step 3: Process each segment position separately
-            total_loss = 0.0
-            valid_segments = 0
-
-            for segment_pos in range(max_segments):
-                # Extract all segments at this position from all episodes
-                segment_batch = self._extract_segment_batch(
-                    padded_episodes, segment_pos, num_episodes
-                )
-
-                # Skip if this segment position has no valid data
-                if segment_batch["valid_count"] == 0:
-                    continue
-
-                # Compute loss for this segment batch
-                segment_loss = self._compute_segment_batch_loss(model, segment_batch)
-
-                # Weight the loss by number of valid segments in this batch
-                total_loss += segment_loss * segment_batch["valid_count"]
-                valid_segments += segment_batch["valid_count"]
-
-            # Average loss across all valid segments
-            if valid_segments == 0:
+            # If no segments on any GPU, return zero loss
+            if max_num_segments == 0:
                 return torch.tensor(0.0, device=device, requires_grad=True)
 
-            final_loss = total_loss / valid_segments
-            return final_loss
+            # Step 3: Pad to global max segments
+            while len(all_prompt_ids) < max_num_segments:
+                # Add dummy segments
+                all_prompt_ids.append([self.processing_class.pad_token_id])
+                all_prompt_masks.append([0])
+                all_completion_ids.append([self.processing_class.pad_token_id])
+                all_completion_masks.append([0])
+                all_advantages.append(0.0)
+                valid_segment_mask.append(False)
+
+            # Step 4: Convert to padded tensors
+            prompt_ids = [torch.tensor(ids, device=device) for ids in all_prompt_ids]
+            prompt_ids = pad(
+                prompt_ids, padding_value=self.processing_class.pad_token_id
+            )
+
+            prompt_mask = [
+                torch.tensor(mask, device=device) for mask in all_prompt_masks
+            ]
+            prompt_mask = pad(prompt_mask, padding_value=0)
+
+            completion_ids = [
+                torch.tensor(ids, device=device) for ids in all_completion_ids
+            ]
+            completion_ids = pad(
+                completion_ids, padding_value=self.processing_class.pad_token_id
+            )
+
+            completion_mask = [
+                torch.tensor(mask, device=device) for mask in all_completion_masks
+            ]
+            completion_mask = pad(completion_mask, padding_value=0)
+
+            advantages = torch.tensor(
+                all_advantages, dtype=torch.float32, device=device
+            )
+            valid_segment_mask = torch.tensor(
+                valid_segment_mask, dtype=torch.bool, device=device
+            )
+
+            # Concatenate prompt and completion
+            input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+            logits_to_keep = completion_ids.size(1)
+
+            # Compute per-token log probabilities
+            per_token_logps = self._get_per_token_logps(
+                model, input_ids, attention_mask, logits_to_keep
+            )
+
+            # Compute old log probs
+            with torch.no_grad():
+                if self.num_iterations > 1:
+                    old_per_token_logps = self._get_per_token_logps(
+                        self.model, input_ids, attention_mask, logits_to_keep
+                    )
+                else:
+                    old_per_token_logps = per_token_logps.detach()
+
+            # Compute KL divergence if needed
+            if self.beta != 0.0:
+                with torch.no_grad():
+                    if self.ref_model is not None:
+                        ref_per_token_logps = self._get_per_token_logps(
+                            self.ref_model, input_ids, attention_mask, logits_to_keep
+                        )
+                    else:
+                        with self.accelerator.unwrap_model(
+                            self.model
+                        ).disable_adapter():
+                            ref_per_token_logps = self._get_per_token_logps(
+                                self.model, input_ids, attention_mask, logits_to_keep
+                            )
+                per_token_kl = (
+                    torch.exp(ref_per_token_logps - per_token_logps)
+                    - (ref_per_token_logps - per_token_logps)
+                    - 1
+                )
+
+            # Compute GRPO loss
+            coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+            coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+
+            per_token_loss1 = coef_1 * advantages.unsqueeze(1)
+            per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+            per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+
+            if self.beta != 0.0:
+                per_token_loss = per_token_loss + self.beta * per_token_kl
+
+            # Apply valid segment mask to exclude padding from loss
+            # Expand valid_segment_mask to match token dimension
+            valid_mask_expanded = valid_segment_mask.unsqueeze(1).expand_as(
+                completion_mask
+            )
+            masked_completion_mask = completion_mask * valid_mask_expanded
+
+            # Compute final loss based on loss type
+            if self.loss_type == "grpo":
+                loss = (
+                    (per_token_loss * completion_mask).sum(-1)
+                    / completion_mask.sum(-1).clamp(min=1.0)
+                ).mean()
+            elif self.loss_type == "bnpo":
+                loss = (
+                    per_token_loss * completion_mask
+                ).sum() / completion_mask.sum().clamp(min=1.0)
+            elif self.loss_type == "dr_grpo":
+                loss = (per_token_loss * masked_completion_mask).sum() / (
+                    per_token_loss.size(0) * self.max_completion_length
+                )
+            else:
+                raise ValueError(f"Unknown loss type: {self.loss_type}")
+
+            # Log metrics (only for valid segments)
+            mode = "eval" if self.control.should_evaluate else "train"
+
+            if self.beta != 0.0 and masked_completion_mask.sum() > 0:
+                mean_kl = (
+                    per_token_kl * masked_completion_mask
+                ).sum() / masked_completion_mask.sum()
+                self._metrics[mode]["kl"].append(
+                    self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
+                )
+
+            # Compute clipping metrics (only for valid segments)
+            if masked_completion_mask.sum() > 0:
+                is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (
+                    advantages.unsqueeze(1) < 0
+                )
+                is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
+                    advantages.unsqueeze(1) > 0
+                )
+                is_region_clipped = is_low_clipped | is_high_clipped
+
+                low_clip = (
+                    is_low_clipped * masked_completion_mask
+                ).sum() / masked_completion_mask.sum()
+                high_clip = (
+                    is_high_clipped * masked_completion_mask
+                ).sum() / masked_completion_mask.sum()
+                clip_ratio = (
+                    is_region_clipped * masked_completion_mask
+                ).sum() / masked_completion_mask.sum()
+
+                gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
+                self._metrics[mode]["clip_ratio/low_mean"].append(
+                    gathered_low_clip.nanmean().item()
+                )
+                self._metrics[mode]["clip_ratio/low_min"].append(
+                    nanmin(gathered_low_clip).item()
+                )
+
+                gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
+                self._metrics[mode]["clip_ratio/high_mean"].append(
+                    gathered_high_clip.nanmean().item()
+                )
+                self._metrics[mode]["clip_ratio/high_max"].append(
+                    nanmax(gathered_high_clip).item()
+                )
+
+                gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
+                self._metrics[mode]["clip_ratio/region_mean"].append(
+                    gathered_clip_ratio.nanmean().item()
+                )
+
+            return loss
         else:
             # Fall back to parent implementation for non-compression cases
             return super()._compute_loss(model, inputs)
-
-    def _pad_episodes_to_max_segments(self, inputs, max_segments):
-        """Pad all episodes to have max_segments segments with dummy segments."""
-        padded_inputs = {
-            "prompt_ids": [],
-            "prompt_mask": [],
-            "completion_ids": [],
-            "completion_mask": [],
-            "advantages": [],
-            "is_valid": [],  # Track which segments are real vs padded
-        }
-
-        for episode_idx in range(len(inputs["prompt_ids"])):
-            # Get episode advantage
-            if isinstance(inputs["advantages"], torch.Tensor):
-                episode_advantage = (
-                    inputs["advantages"][episode_idx].item()
-                    if inputs["advantages"].dim() > 0
-                    else inputs["advantages"].item()
-                )
-            else:
-                episode_advantage = inputs["advantages"][episode_idx]
-
-            # Pad this episode to max_segments
-            episode_prompt_ids = []
-            episode_prompt_masks = []
-            episode_completion_ids = []
-            episode_completion_masks = []
-            episode_is_valid = []
-
-            # Add real segments
-            for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
-                episode_prompt_ids.append(
-                    inputs["prompt_ids"][episode_idx][segment_idx]
-                )
-                episode_prompt_masks.append(
-                    inputs["prompt_mask"][episode_idx][segment_idx]
-                )
-                episode_completion_ids.append(
-                    inputs["completion_ids"][episode_idx][segment_idx]
-                )
-                episode_completion_masks.append(
-                    inputs["completion_mask"][episode_idx][segment_idx]
-                )
-
-                # Check if this segment is valid (non-empty completion)
-                is_valid = len(inputs["completion_ids"][episode_idx][segment_idx]) > 0
-                episode_is_valid.append(is_valid)
-
-            # Add dummy segments to reach max_segments
-            while len(episode_prompt_ids) < max_segments:
-                # Create dummy segment
-                episode_prompt_ids.append([self.processing_class.pad_token_id])
-                episode_prompt_masks.append([0])
-                episode_completion_ids.append([self.processing_class.pad_token_id])
-                episode_completion_masks.append([0])
-                episode_is_valid.append(False)
-
-            # Add to padded inputs
-            padded_inputs["prompt_ids"].append(episode_prompt_ids)
-            padded_inputs["prompt_mask"].append(episode_prompt_masks)
-            padded_inputs["completion_ids"].append(episode_completion_ids)
-            padded_inputs["completion_mask"].append(episode_completion_masks)
-            padded_inputs["advantages"].append(episode_advantage)
-            padded_inputs["is_valid"].append(episode_is_valid)
-
-        return padded_inputs
-
-    def _extract_segment_batch(self, padded_episodes, segment_pos, num_episodes):
-        """Extract all segments at segment_pos from all episodes into a batch."""
-        device = self.accelerator.device
-
-        # Collect segments at this position
-        batch_prompt_ids = []
-        batch_prompt_masks = []
-        batch_completion_ids = []
-        batch_completion_masks = []
-        batch_advantages = []
-        valid_count = 0
-
-        for episode_idx in range(num_episodes):
-            prompt_ids = padded_episodes["prompt_ids"][episode_idx][segment_pos]
-            prompt_mask = padded_episodes["prompt_mask"][episode_idx][segment_pos]
-            completion_ids = padded_episodes["completion_ids"][episode_idx][segment_pos]
-            completion_mask = padded_episodes["completion_mask"][episode_idx][
-                segment_pos
-            ]
-            advantage = padded_episodes["advantages"][episode_idx]
-            is_valid = padded_episodes["is_valid"][episode_idx][segment_pos]
-
-            batch_prompt_ids.append(prompt_ids)
-            batch_prompt_masks.append(prompt_mask)
-            batch_completion_ids.append(completion_ids)
-            batch_completion_masks.append(completion_mask)
-            batch_advantages.append(advantage)
-
-            if is_valid:
-                valid_count += 1
-
-        # Convert to padded tensors
-        if valid_count == 0:
-            return {"valid_count": 0}
-
-        # Find max lengths for this batch
-        max_prompt_len = max(len(ids) for ids in batch_prompt_ids)
-        max_completion_len = max(len(ids) for ids in batch_completion_ids)
-
-        # Create padded tensors
-        batch_size = num_episodes
-        prompt_ids_tensor = torch.full(
-            (batch_size, max_prompt_len),
-            self.processing_class.pad_token_id,
-            dtype=torch.long,
-            device=device,
-        )
-        prompt_mask_tensor = torch.zeros(
-            (batch_size, max_prompt_len), dtype=torch.long, device=device
-        )
-        completion_ids_tensor = torch.full(
-            (batch_size, max_completion_len),
-            self.processing_class.pad_token_id,
-            dtype=torch.long,
-            device=device,
-        )
-        completion_mask_tensor = torch.zeros(
-            (batch_size, max_completion_len), dtype=torch.long, device=device
-        )
-
-        # Fill tensors
-        for i in range(batch_size):
-            prompt_len = len(batch_prompt_ids[i])
-            completion_len = len(batch_completion_ids[i])
-
-            prompt_ids_tensor[i, :prompt_len] = torch.tensor(
-                batch_prompt_ids[i], dtype=torch.long, device=device
-            )
-            prompt_mask_tensor[i, :prompt_len] = torch.tensor(
-                batch_prompt_masks[i], dtype=torch.long, device=device
-            )
-            completion_ids_tensor[i, :completion_len] = torch.tensor(
-                batch_completion_ids[i], dtype=torch.long, device=device
-            )
-            completion_mask_tensor[i, :completion_len] = torch.tensor(
-                batch_completion_masks[i], dtype=torch.long, device=device
-            )
-
-        return {
-            "prompt_ids": prompt_ids_tensor,
-            "prompt_mask": prompt_mask_tensor,
-            "completion_ids": completion_ids_tensor,
-            "completion_mask": completion_mask_tensor,
-            "advantages": torch.tensor(
-                batch_advantages, dtype=torch.float32, device=device
-            ),
-            "valid_count": valid_count,
-            "is_valid_mask": torch.tensor(
-                [
-                    padded_episodes["is_valid"][i][segment_pos]
-                    for i in range(num_episodes)
-                ],
-                dtype=torch.bool,
-                device=device,
-            ),
-        }
-
-    def _compute_segment_batch_loss(self, model, segment_batch):
-        """Compute loss for a batch of segments at the same position."""
-        device = self.accelerator.device
-
-        # Concatenate prompt and completion
-        input_ids = torch.cat(
-            [segment_batch["prompt_ids"], segment_batch["completion_ids"]], dim=1
-        )
-        attention_mask = torch.cat(
-            [segment_batch["prompt_mask"], segment_batch["completion_mask"]], dim=1
-        )
-        logits_to_keep = segment_batch["completion_ids"].size(1)
-        batch_size = segment_batch["prompt_ids"].size(0)
-
-        # Get per-token log probabilities
-        per_token_logps = self._get_per_token_logps(
-            model, input_ids, attention_mask, logits_to_keep, batch_size=batch_size
-        )
-
-        # Compute old log probs
-        with torch.no_grad():
-            if self.num_iterations > 1:
-                old_per_token_logps = self._get_per_token_logps(
-                    self.model,
-                    input_ids,
-                    attention_mask,
-                    logits_to_keep,
-                    batch_size=batch_size,
-                )
-            else:
-                old_per_token_logps = per_token_logps.detach()
-
-        # Compute KL divergence if needed
-        if self.beta != 0.0:
-            with torch.no_grad():
-                if self.ref_model is not None:
-                    ref_per_token_logps = self._get_per_token_logps(
-                        self.ref_model,
-                        input_ids,
-                        attention_mask,
-                        logits_to_keep,
-                        batch_size=batch_size,
-                    )
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        ref_per_token_logps = self._get_per_token_logps(
-                            self.model,
-                            input_ids,
-                            attention_mask,
-                            logits_to_keep,
-                            batch_size=batch_size,
-                        )
-            per_token_kl = (
-                torch.exp(ref_per_token_logps - per_token_logps)
-                - (ref_per_token_logps - per_token_logps)
-                - 1
-            )
-
-        # Create advantages tensor
-        advantages_tensor = segment_batch["advantages"].unsqueeze(1)
-
-        # Compute GRPO loss
-        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
-
-        per_token_loss1 = coef_1 * advantages_tensor
-        per_token_loss2 = coef_2 * advantages_tensor
-        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
-
-        if self.beta != 0.0:
-            per_token_loss = per_token_loss + self.beta * per_token_kl
-
-        # Apply validity mask to only compute loss on valid segments
-        completion_mask = segment_batch["completion_mask"]
-        is_valid_mask = segment_batch["is_valid_mask"]
-
-        # Zero out loss for invalid segments
-        valid_completion_mask = completion_mask * is_valid_mask.unsqueeze(1)
-
-        # Compute loss based on type
-        if self.loss_type == "grpo":
-            # Per-segment loss, then average (only over valid segments)
-            segment_losses = (per_token_loss * valid_completion_mask).sum(
-                dim=1
-            ) / valid_completion_mask.sum(dim=1).clamp(min=1.0)
-            # Only average over valid segments
-            valid_segment_losses = segment_losses[is_valid_mask]
-            loss = (
-                valid_segment_losses.mean()
-                if len(valid_segment_losses) > 0
-                else torch.tensor(0.0, device=device)
-            )
-        elif self.loss_type == "bnpo":
-            # Total loss normalized by total valid tokens
-            loss = (
-                per_token_loss * valid_completion_mask
-            ).sum() / valid_completion_mask.sum().clamp(min=1.0)
-        elif self.loss_type == "dr_grpo":
-            # Loss normalized by valid segments and max completion length
-            valid_segments = is_valid_mask.sum().clamp(min=1.0)
-            loss = (per_token_loss * valid_completion_mask).sum() / (
-                valid_segments * self.max_completion_length
-            )
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type}")
-
-        # Update metrics (you can add this back if needed for segment-level metrics)
-        # Note: You might want to accumulate metrics across all segments and log them once
-
-        return loss
 
     def __del__(self):
         """Clean up gym environments when trainer is destroyed."""
