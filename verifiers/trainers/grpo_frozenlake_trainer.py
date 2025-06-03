@@ -915,11 +915,10 @@ summary here ...
         compression_info = compression_info[process_slice]
 
         # For context compression, we need to handle old_per_token_logps differently
-        if any(len(segments) > 1 for segments in completion_ids_list):
-            # TODO: in original function, the old_per_token_logps were computed here. Is it more efficient to compute it here?
-            # We'll compute old_per_token_logps in _compute_loss for each segment
-            old_per_token_logps = None
-            ref_per_token_logps = None
+        # TODO: in original function, the old_per_token_logps were computed here. Is it more efficient to compute it here?
+        # We'll compute old_per_token_logps in _compute_loss for each segment
+        old_per_token_logps = None
+        ref_per_token_logps = None
 
         # Compute rewards
         completions = completion_messages
