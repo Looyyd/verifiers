@@ -44,6 +44,7 @@ from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
 DEBUG = False
+MAX_COMPRESSIONS = 3
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
@@ -83,7 +84,6 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         max_episode_steps: int = 50,  # TODO: this could be handled by env, right now we count the steps which is not really needed?
         frozen_tile_probability: float = 0.8,
         # Context compression parameters
-        use_context_compression: bool = True,
         compression_threshold: float = 0.75,
         compression_prompt_template: str = (
             "This conversation is getting long. Sum up this conversation so far and the summary "
@@ -105,20 +105,19 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         self.frozen_tile_probability = frozen_tile_probability
 
         # Context compression configuration
-        self.use_context_compression = use_context_compression
         self.compression_threshold = compression_threshold
         self.compression_prompt_template = compression_prompt_template
 
         # Validate compression parameters
-        if self.use_context_compression:
-            if not (0.0 < self.compression_threshold <= 1.0):
-                raise ValueError(
-                    f"compression_threshold must be between 0 and 1, got {self.compression_threshold}"
-                )
-            if not self.compression_prompt_template:
-                raise ValueError(
-                    "compression_prompt_template cannot be empty when using context compression"
-                )
+        if not (0.0 < self.compression_threshold <= 1.0):
+            raise ValueError(
+                f"compression_threshold must be between 0 and 1, got {self.compression_threshold}"
+            )
+        # TODO: could refactor this, sometimes compression will be without a prompt, just reset the history!
+        if not self.compression_prompt_template:
+            raise ValueError(
+                "compression_prompt_template cannot be empty when using context compression"
+            )
 
         # Validate grid distribution
         total_prob = sum(self.grid_distribution.values())
@@ -460,137 +459,108 @@ summary here ...
             states = self.step_frozenlake(states, llm, sampling_params)
             all_completed = all(state["completed"] for state in states)
 
-        # Ensure we capture final segments before cleanup
-        if self.use_context_compression:
-            for state in states:
-                # Always capture the final segment if there are any completion tokens
-                if state["current_segment_start"] < len(state["completion_ids"]):
-                    # Add the final segment
-                    segment_completion_ids = state["completion_ids"][
-                        state["current_segment_start"] :
-                    ]
-                    segment_completion_mask = state["completion_mask"][
-                        state["current_segment_start"] :
-                    ]
+        # Add the final segment.
+        for state in states:
+            # Always capture the final segment if there are any completion tokens
+            if state["current_segment_start"] < len(state["completion_ids"]):
+                # Add the final segment
+                segment_completion_ids = state["completion_ids"][
+                    state["current_segment_start"] :
+                ]
+                segment_completion_mask = state["completion_mask"][
+                    state["current_segment_start"] :
+                ]
 
-                    # Use the current prompt_ids for this segment
-                    segment_prompt_ids = (
-                        state["prompt_ids"]
-                        if state["prompt_ids"]
-                        else state.get("initial_prompt_ids", [])
+                # Use the current prompt_ids for this segment
+                segment_prompt_ids = (
+                    state["prompt_ids"]
+                    if state["prompt_ids"]
+                    else state.get("initial_prompt_ids", [])
+                )
+
+                if (
+                    segment_completion_ids and segment_prompt_ids
+                ):  # Only add if we have both
+                    state["conversation_segments"].append(
+                        {
+                            "prompt_ids": segment_prompt_ids,
+                            "completion_ids": segment_completion_ids,
+                            "completion_mask": segment_completion_mask,
+                        }
                     )
-
-                    if (
-                        segment_completion_ids and segment_prompt_ids
-                    ):  # Only add if we have both
-                        state["conversation_segments"].append(
-                            {
-                                "prompt_ids": segment_prompt_ids,
-                                "completion_ids": segment_completion_ids,
-                                "completion_mask": segment_completion_mask,
-                            }
-                        )
-                    else:
-                        # This shouldn't happen
-                        raise RuntimeError(
-                            f"WARNING: Missing data for segment creation"
-                        )
-
                 else:
-                    raise RuntimeError(
-                        f"WARNING: Episode completed with no segments captured. "
-                        f"completion_ids length: {len(state['completion_ids'])}, "
-                        f"current_segment_start: {state['current_segment_start']}"
-                    )
+                    # This shouldn't happen
+                    raise RuntimeError(f"WARNING: Missing data for segment creation")
 
-        # Extract results with conversation segments
-        if self.use_context_compression:
-            # Return arrays of segments for each episode
-            all_prompt_ids = []
-            all_prompt_masks = []
-            all_completion_ids = []
-            all_completion_masks = []
+            else:
+                raise RuntimeError(
+                    f"WARNING: Episode completed with no segments captured. "
+                    f"completion_ids length: {len(state['completion_ids'])}, "
+                    f"current_segment_start: {state['current_segment_start']}"
+                )
 
-            for state in states:
-                # Extract segments
-                episode_prompt_ids = []
-                episode_prompt_masks = []
-                episode_completion_ids = []
-                episode_completion_masks = []
+        # Return arrays of segments for each episode
+        all_prompt_ids = []
+        all_prompt_masks = []
+        all_completion_ids = []
+        all_completion_masks = []
 
-                for segment in state["conversation_segments"]:
-                    episode_prompt_ids.append(segment["prompt_ids"])
-                    episode_completion_ids.append(segment["completion_ids"])
-                    episode_completion_masks.append(segment["completion_mask"])
-                    # Create prompt mask of all 1s
-                    episode_prompt_masks.append([1] * len(segment["prompt_ids"]))
+        for state in states:
+            # Extract segments
+            episode_prompt_ids = []
+            episode_prompt_masks = []
+            episode_completion_ids = []
+            episode_completion_masks = []
 
-                # Ensure we have at least one segment per episode
-                if not episode_prompt_ids:
-                    # This should not happen if the logic above is correct
-                    raise RuntimeError(
-                        f"Episode completed with no segments captured. "
-                        f"completion_ids length: {len(state['completion_ids'])}, "
-                        f"current_segment_start: {state['current_segment_start']}"
-                    )
+            for segment in state["conversation_segments"]:
+                episode_prompt_ids.append(segment["prompt_ids"])
+                episode_completion_ids.append(segment["completion_ids"])
+                episode_completion_masks.append(segment["completion_mask"])
+                # Create prompt mask of all 1s
+                episode_prompt_masks.append([1] * len(segment["prompt_ids"]))
 
-                all_prompt_ids.append(episode_prompt_ids)
-                all_prompt_masks.append(episode_prompt_masks)
-                all_completion_ids.append(episode_completion_ids)
-                all_completion_masks.append(episode_completion_masks)
+            # Ensure we have at least one segment per episode
+            if not episode_prompt_ids:
+                # This should not happen if the logic above is correct
+                raise RuntimeError(
+                    f"Episode completed with no segments captured. "
+                    f"completion_ids length: {len(state['completion_ids'])}, "
+                    f"current_segment_start: {state['current_segment_start']}"
+                )
 
-            completion_messages = [
-                s["messages"][s["prompt_messages"] :] for s in states
-            ]
-            history_for_logging = [s["history_for_logging"] for s in states]
-            episode_outcomes = [s["episode_outcome"] for s in states]
-            compression_info = [
-                {
-                    "needed_compression": s.get("has_been_compressed", False),
-                    "compression_count": s.get("compression_count", 0),
-                }
-                for s in states
-            ]
+            all_prompt_ids.append(episode_prompt_ids)
+            all_prompt_masks.append(episode_prompt_masks)
+            all_completion_ids.append(episode_completion_ids)
+            all_completion_masks.append(episode_completion_masks)
 
-            # Clean up environments
-            for env_info in self._gym_envs.values():
-                if "env" in env_info:
-                    env_info["env"].close()
-            self._gym_envs.clear()
-
-            return {
-                "prompt_ids": all_prompt_ids,
-                "prompt_masks": all_prompt_masks,
-                "completion_ids": all_completion_ids,
-                "completion_masks": all_completion_masks,
-                "messages": completion_messages,
-                "history_for_logging": history_for_logging,
-                "episode_outcomes": episode_outcomes,
-                "compression_info": compression_info,
-                "use_segments": True,  # Flag to indicate segmented data
+        completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
+        history_for_logging = [s["history_for_logging"] for s in states]
+        episode_outcomes = [s["episode_outcome"] for s in states]
+        compression_info = [
+            {
+                "needed_compression": s.get("has_been_compressed", False),
+                "compression_count": s.get("compression_count", 0),
             }
-        else:
-            # Original non-compression path
-            completion_ids = [s["completion_ids"] for s in states]
-            completion_mask = [s["completion_mask"] for s in states]
-            episode_outcomes = [s["episode_outcome"] for s in states]
-            completion_messages = [
-                s["messages"][s["prompt_messages"] :] for s in states
-            ]
-            history_for_logging = [s["history_for_logging"] for s in states]
+            for s in states
+        ]
 
-            # Clean up environments
-            for env_info in self._gym_envs.values():
-                if "env" in env_info:
-                    env_info["env"].close()
-            self._gym_envs.clear()
+        # Clean up environments
+        for env_info in self._gym_envs.values():
+            if "env" in env_info:
+                env_info["env"].close()
+        self._gym_envs.clear()
 
-            return {
-                "ids": completion_ids,
-                "messages": completion_messages,
-                "mask": completion_mask,
-                "episode_outcomes": episode_outcomes,
-            }
+        return {
+            "prompt_ids": all_prompt_ids,
+            "prompt_masks": all_prompt_masks,
+            "completion_ids": all_completion_ids,
+            "completion_masks": all_completion_masks,
+            "messages": completion_messages,
+            "history_for_logging": history_for_logging,
+            "episode_outcomes": episode_outcomes,
+            "compression_info": compression_info,
+            "use_segments": True,  # Flag to indicate segmented data
+        }
 
     def step_frozenlake(
         self,
@@ -788,10 +758,9 @@ summary here ...
                             - state["current_segment_start"]
                         )
                         if (
-                            self.use_context_compression
-                            and current_segment_length
+                            current_segment_length
                             >= self.compression_threshold * self.max_completion_length
-                            and state["compression_count"] < 3
+                            and state["compression_count"] < MAX_COMPRESSIONS
                         ):  # Limit compressions to avoid infinite loops
 
                             # Add compression prompt
@@ -963,61 +932,11 @@ summary here ...
         compression_info = compression_info[process_slice]
 
         # For context compression, we need to handle old_per_token_logps differently
-        if self.use_context_compression and any(
-            len(segments) > 1 for segments in completion_ids_list
-        ):
+        if any(len(segments) > 1 for segments in completion_ids_list):
+            # TODO: in original function, the old_per_token_logps were computed here. Is it more efficient to compute it here?
             # We'll compute old_per_token_logps in _compute_loss for each segment
             old_per_token_logps = None
             ref_per_token_logps = None
-        else:
-            # Original path for non-compression
-            # Pad and concatenate for standard processing
-            completion_ids = [
-                torch.tensor(ids[0], device=device) for ids in completion_ids_list
-            ]
-            completion_ids = pad(
-                completion_ids, padding_value=self.processing_class.pad_token_id
-            )
-
-            completion_mask = [
-                torch.tensor(mask[0], device=device) for mask in completion_masks_list
-            ]
-            completion_mask = pad(completion_mask, padding_value=0)
-
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-            attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-
-            logits_to_keep = completion_ids.size(1)
-
-            # Compute logps
-            with torch.no_grad():
-                if self.num_iterations > 1:
-                    old_per_token_logps = self._get_per_token_logps(
-                        self.model,
-                        prompt_completion_ids,
-                        attention_mask,
-                        logits_to_keep,
-                    )
-                else:
-                    old_per_token_logps = None
-
-                if self.beta == 0.0:
-                    ref_per_token_logps = None
-                elif self.ref_model is not None:
-                    ref_per_token_logps = self._get_per_token_logps(
-                        self.ref_model,
-                        prompt_completion_ids,
-                        attention_mask,
-                        logits_to_keep,
-                    )
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        ref_per_token_logps = self._get_per_token_logps(
-                            self.model,
-                            prompt_completion_ids,
-                            attention_mask,
-                            logits_to_keep,
-                        )
 
         # Compute rewards
         completions = completion_messages
@@ -1118,7 +1037,6 @@ summary here ...
         if (
             self.log_completions
             and self.state.global_step % self.args.logging_steps == 0
-            and self.use_context_compression
         ):
             # Log compression statistics
             compression_stats = []
@@ -1153,20 +1071,10 @@ summary here ...
                 print(f"  Avg reward (uncompressed): {avg_reward_uncompressed:.3f}")
 
         return {
-            "prompt_ids": (
-                prompt_ids_list if self.use_context_compression else prompt_ids
-            ),
-            "prompt_mask": (
-                prompt_masks_list if self.use_context_compression else prompt_mask
-            ),
-            "completion_ids": (
-                completion_ids_list if self.use_context_compression else completion_ids
-            ),
-            "completion_mask": (
-                completion_masks_list
-                if self.use_context_compression
-                else completion_mask
-            ),
+            "prompt_ids": (prompt_ids_list),
+            "prompt_mask": (prompt_masks_list),
+            "completion_ids": (completion_ids_list),
+            "completion_mask": (completion_masks_list),
             "old_per_token_logps": old_per_token_logps,
             "ref_per_token_logps": ref_per_token_logps,
             "advantages": advantages,
@@ -1176,223 +1084,204 @@ summary here ...
     def _compute_loss(self, model, inputs):
         """Override to handle context compression with multiple conversation segments."""
 
-        # Check if we have segmented data (arrays of conversation segments)
-        if (
-            self.use_context_compression
-            and isinstance(inputs["prompt_ids"], list)
-            and any(isinstance(p, list) for p in inputs["prompt_ids"])
-        ):
-            device = self.accelerator.device
+        device = self.accelerator.device
 
-            # Step 1: Flatten all segments locally
-            all_prompt_ids = []
-            all_prompt_masks = []
-            all_completion_ids = []
-            all_completion_masks = []
-            all_advantages = []
-            valid_segment_mask = []  # Track which segments are real vs padding
+        # Step 1: Flatten all segments locally
+        all_prompt_ids = []
+        all_prompt_masks = []
+        all_completion_ids = []
+        all_completion_masks = []
+        all_advantages = []
+        valid_segment_mask = []  # Track which segments are real vs padding
 
-            for episode_idx in range(len(inputs["prompt_ids"])):
-                episode_advantage = inputs["advantages"][episode_idx]
+        for episode_idx in range(len(inputs["prompt_ids"])):
+            episode_advantage = inputs["advantages"][episode_idx]
 
-                for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
-                    # Check if segment has completion tokens
-                    if len(inputs["completion_ids"][episode_idx][segment_idx]) > 0:
-                        all_prompt_ids.append(
-                            inputs["prompt_ids"][episode_idx][segment_idx]
-                        )
-                        all_prompt_masks.append(
-                            inputs["prompt_mask"][episode_idx][segment_idx]
-                        )
-                        all_completion_ids.append(
-                            inputs["completion_ids"][episode_idx][segment_idx]
-                        )
-                        all_completion_masks.append(
-                            inputs["completion_mask"][episode_idx][segment_idx]
-                        )
-                        all_advantages.append(episode_advantage)
-                        valid_segment_mask.append(True)
-
-            # Step 2: Find global max number of segments
-            local_num_segments = len(all_prompt_ids)
-            local_num_tensor = torch.tensor(local_num_segments, device=device)
-            all_num_segments = self.accelerator.gather(local_num_tensor)
-            max_num_segments = all_num_segments.max().item()
-
-            # If no segments on any GPU, return zero loss
-            if max_num_segments == 0:
-                return torch.tensor(0.0, device=device, requires_grad=True)
-
-            # Step 3: Pad to global max segments
-            while len(all_prompt_ids) < max_num_segments:
-                # Add dummy segments
-                all_prompt_ids.append([self.processing_class.pad_token_id])
-                all_prompt_masks.append([0])
-                all_completion_ids.append([self.processing_class.pad_token_id])
-                all_completion_masks.append([0])
-                all_advantages.append(0.0)
-                valid_segment_mask.append(False)
-
-            # Step 4: Convert to padded tensors
-            prompt_ids = [torch.tensor(ids, device=device) for ids in all_prompt_ids]
-            prompt_ids = pad(
-                prompt_ids, padding_value=self.processing_class.pad_token_id
-            )
-
-            prompt_mask = [
-                torch.tensor(mask, device=device) for mask in all_prompt_masks
-            ]
-            prompt_mask = pad(prompt_mask, padding_value=0)
-
-            completion_ids = [
-                torch.tensor(ids, device=device) for ids in all_completion_ids
-            ]
-            completion_ids = pad(
-                completion_ids, padding_value=self.processing_class.pad_token_id
-            )
-
-            completion_mask = [
-                torch.tensor(mask, device=device) for mask in all_completion_masks
-            ]
-            completion_mask = pad(completion_mask, padding_value=0)
-
-            advantages = torch.tensor(
-                all_advantages, dtype=torch.float32, device=device
-            )
-            valid_segment_mask = torch.tensor(
-                valid_segment_mask, dtype=torch.bool, device=device
-            )
-
-            # Concatenate prompt and completion
-            input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-            attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-            logits_to_keep = completion_ids.size(1)
-
-            # Compute per-token log probabilities
-            per_token_logps = self._get_per_token_logps(
-                model, input_ids, attention_mask, logits_to_keep
-            )
-
-            # Compute old log probs
-            with torch.no_grad():
-                if self.num_iterations > 1:
-                    old_per_token_logps = self._get_per_token_logps(
-                        self.model, input_ids, attention_mask, logits_to_keep
+            for segment_idx in range(len(inputs["prompt_ids"][episode_idx])):
+                # Check if segment has completion tokens
+                if len(inputs["completion_ids"][episode_idx][segment_idx]) > 0:
+                    all_prompt_ids.append(
+                        inputs["prompt_ids"][episode_idx][segment_idx]
                     )
-                else:
-                    old_per_token_logps = per_token_logps.detach()
+                    all_prompt_masks.append(
+                        inputs["prompt_mask"][episode_idx][segment_idx]
+                    )
+                    all_completion_ids.append(
+                        inputs["completion_ids"][episode_idx][segment_idx]
+                    )
+                    all_completion_masks.append(
+                        inputs["completion_mask"][episode_idx][segment_idx]
+                    )
+                    all_advantages.append(episode_advantage)
+                    valid_segment_mask.append(True)
 
-            # Compute KL divergence if needed
-            if self.beta != 0.0:
-                with torch.no_grad():
-                    if self.ref_model is not None:
-                        ref_per_token_logps = self._get_per_token_logps(
-                            self.ref_model, input_ids, attention_mask, logits_to_keep
-                        )
-                    else:
-                        with self.accelerator.unwrap_model(
-                            self.model
-                        ).disable_adapter():
-                            ref_per_token_logps = self._get_per_token_logps(
-                                self.model, input_ids, attention_mask, logits_to_keep
-                            )
-                per_token_kl = (
-                    torch.exp(ref_per_token_logps - per_token_logps)
-                    - (ref_per_token_logps - per_token_logps)
-                    - 1
-                )
+        # Step 2: Find global max number of segments
+        local_num_segments = len(all_prompt_ids)
+        local_num_tensor = torch.tensor(local_num_segments, device=device)
+        all_num_segments = self.accelerator.gather(local_num_tensor)
+        max_num_segments = all_num_segments.max().item()
 
-            # Compute GRPO loss
-            coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-            coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+        # If no segments on any GPU, return zero loss
+        if max_num_segments == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
 
-            per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-            per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-            per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        # Step 3: Pad to global max segments
+        while len(all_prompt_ids) < max_num_segments:
+            # Add dummy segments
+            all_prompt_ids.append([self.processing_class.pad_token_id])
+            all_prompt_masks.append([0])
+            all_completion_ids.append([self.processing_class.pad_token_id])
+            all_completion_masks.append([0])
+            all_advantages.append(0.0)
+            valid_segment_mask.append(False)
 
-            if self.beta != 0.0:
-                per_token_loss = per_token_loss + self.beta * per_token_kl
+        # Step 4: Convert to padded tensors
+        prompt_ids = [torch.tensor(ids, device=device) for ids in all_prompt_ids]
+        prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id)
 
-            # Apply valid segment mask to exclude padding from loss
-            # Expand valid_segment_mask to match token dimension
-            valid_mask_expanded = valid_segment_mask.unsqueeze(1).expand_as(
-                completion_mask
-            )
-            masked_completion_mask = completion_mask * valid_mask_expanded
+        prompt_mask = [torch.tensor(mask, device=device) for mask in all_prompt_masks]
+        prompt_mask = pad(prompt_mask, padding_value=0)
 
-            # Compute final loss based on loss type
-            if self.loss_type == "grpo":
-                loss = (
-                    (per_token_loss * completion_mask).sum(-1)
-                    / completion_mask.sum(-1).clamp(min=1.0)
-                ).mean()
-            elif self.loss_type == "bnpo":
-                loss = (
-                    per_token_loss * completion_mask
-                ).sum() / completion_mask.sum().clamp(min=1.0)
-            elif self.loss_type == "dr_grpo":
-                loss = (per_token_loss * masked_completion_mask).sum() / (
-                    per_token_loss.size(0) * self.max_completion_length
+        completion_ids = [
+            torch.tensor(ids, device=device) for ids in all_completion_ids
+        ]
+        completion_ids = pad(
+            completion_ids, padding_value=self.processing_class.pad_token_id
+        )
+
+        completion_mask = [
+            torch.tensor(mask, device=device) for mask in all_completion_masks
+        ]
+        completion_mask = pad(completion_mask, padding_value=0)
+
+        advantages = torch.tensor(all_advantages, dtype=torch.float32, device=device)
+        valid_segment_mask = torch.tensor(
+            valid_segment_mask, dtype=torch.bool, device=device
+        )
+
+        # Concatenate prompt and completion
+        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        logits_to_keep = completion_ids.size(1)
+
+        # Compute per-token log probabilities
+        per_token_logps = self._get_per_token_logps(
+            model, input_ids, attention_mask, logits_to_keep
+        )
+
+        # Compute old log probs
+        with torch.no_grad():
+            if self.num_iterations > 1:
+                old_per_token_logps = self._get_per_token_logps(
+                    self.model, input_ids, attention_mask, logits_to_keep
                 )
             else:
-                raise ValueError(f"Unknown loss type: {self.loss_type}")
+                old_per_token_logps = per_token_logps.detach()
 
-            # Log metrics (only for valid segments)
-            mode = "eval" if self.control.should_evaluate else "train"
+        # Compute KL divergence if needed
+        if self.beta != 0.0:
+            with torch.no_grad():
+                if self.ref_model is not None:
+                    ref_per_token_logps = self._get_per_token_logps(
+                        self.ref_model, input_ids, attention_mask, logits_to_keep
+                    )
+                else:
+                    with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        ref_per_token_logps = self._get_per_token_logps(
+                            self.model, input_ids, attention_mask, logits_to_keep
+                        )
+            per_token_kl = (
+                torch.exp(ref_per_token_logps - per_token_logps)
+                - (ref_per_token_logps - per_token_logps)
+                - 1
+            )
 
-            if self.beta != 0.0 and masked_completion_mask.sum() > 0:
-                mean_kl = (
-                    per_token_kl * masked_completion_mask
-                ).sum() / masked_completion_mask.sum()
-                self._metrics[mode]["kl"].append(
-                    self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
-                )
+        # Compute GRPO loss
+        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
 
-            # Compute clipping metrics (only for valid segments)
-            if masked_completion_mask.sum() > 0:
-                is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (
-                    advantages.unsqueeze(1) < 0
-                )
-                is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
-                    advantages.unsqueeze(1) > 0
-                )
-                is_region_clipped = is_low_clipped | is_high_clipped
+        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
+        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
 
-                low_clip = (
-                    is_low_clipped * masked_completion_mask
-                ).sum() / masked_completion_mask.sum()
-                high_clip = (
-                    is_high_clipped * masked_completion_mask
-                ).sum() / masked_completion_mask.sum()
-                clip_ratio = (
-                    is_region_clipped * masked_completion_mask
-                ).sum() / masked_completion_mask.sum()
+        if self.beta != 0.0:
+            per_token_loss = per_token_loss + self.beta * per_token_kl
 
-                gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
-                self._metrics[mode]["clip_ratio/low_mean"].append(
-                    gathered_low_clip.nanmean().item()
-                )
-                self._metrics[mode]["clip_ratio/low_min"].append(
-                    nanmin(gathered_low_clip).item()
-                )
+        # Apply valid segment mask to exclude padding from loss
+        # Expand valid_segment_mask to match token dimension
+        valid_mask_expanded = valid_segment_mask.unsqueeze(1).expand_as(completion_mask)
+        masked_completion_mask = completion_mask * valid_mask_expanded
 
-                gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
-                self._metrics[mode]["clip_ratio/high_mean"].append(
-                    gathered_high_clip.nanmean().item()
-                )
-                self._metrics[mode]["clip_ratio/high_max"].append(
-                    nanmax(gathered_high_clip).item()
-                )
-
-                gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
-                self._metrics[mode]["clip_ratio/region_mean"].append(
-                    gathered_clip_ratio.nanmean().item()
-                )
-
-            return loss
+        # Compute final loss based on loss type
+        if self.loss_type == "grpo":
+            loss = (
+                (per_token_loss * completion_mask).sum(-1)
+                / completion_mask.sum(-1).clamp(min=1.0)
+            ).mean()
+        elif self.loss_type == "bnpo":
+            loss = (
+                per_token_loss * completion_mask
+            ).sum() / completion_mask.sum().clamp(min=1.0)
+        elif self.loss_type == "dr_grpo":
+            loss = (per_token_loss * masked_completion_mask).sum() / (
+                per_token_loss.size(0) * self.max_completion_length
+            )
         else:
-            # Fall back to parent implementation for non-compression cases
-            return super()._compute_loss(model, inputs)
+            raise ValueError(f"Unknown loss type: {self.loss_type}")
+
+        # Log metrics (only for valid segments)
+        mode = "eval" if self.control.should_evaluate else "train"
+
+        if self.beta != 0.0 and masked_completion_mask.sum() > 0:
+            mean_kl = (
+                per_token_kl * masked_completion_mask
+            ).sum() / masked_completion_mask.sum()
+            self._metrics[mode]["kl"].append(
+                self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
+            )
+
+        # Compute clipping metrics (only for valid segments)
+        if masked_completion_mask.sum() > 0:
+            is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (
+                advantages.unsqueeze(1) < 0
+            )
+            is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
+                advantages.unsqueeze(1) > 0
+            )
+            is_region_clipped = is_low_clipped | is_high_clipped
+
+            low_clip = (
+                is_low_clipped * masked_completion_mask
+            ).sum() / masked_completion_mask.sum()
+            high_clip = (
+                is_high_clipped * masked_completion_mask
+            ).sum() / masked_completion_mask.sum()
+            clip_ratio = (
+                is_region_clipped * masked_completion_mask
+            ).sum() / masked_completion_mask.sum()
+
+            gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
+            self._metrics[mode]["clip_ratio/low_mean"].append(
+                gathered_low_clip.nanmean().item()
+            )
+            self._metrics[mode]["clip_ratio/low_min"].append(
+                nanmin(gathered_low_clip).item()
+            )
+
+            gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
+            self._metrics[mode]["clip_ratio/high_mean"].append(
+                gathered_high_clip.nanmean().item()
+            )
+            self._metrics[mode]["clip_ratio/high_max"].append(
+                nanmax(gathered_high_clip).item()
+            )
+
+            gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
+            self._metrics[mode]["clip_ratio/region_mean"].append(
+                gathered_clip_ratio.nanmean().item()
+            )
+
+        return loss
 
     def __del__(self):
         """Clean up gym environments when trainer is destroyed."""
@@ -1407,85 +1296,82 @@ summary here ...
 
         # For context compression, we need to handle the generation differently
         # because the outputs are lists of segments, not tensors that can be split
-        if self.use_context_compression:
-            mode = "train" if self.model.training else "eval"
+        mode = "train" if self.model.training else "eval"
 
-            # Check if we've already generated (outputs will have completion_ids)
-            already_generated = "completion_ids" in inputs and isinstance(
-                inputs.get("completion_ids"), list
+        # Check if we've already generated (outputs will have completion_ids)
+        already_generated = "completion_ids" in inputs and isinstance(
+            inputs.get("completion_ids"), list
+        )
+
+        if mode == "train":
+            # During training, generate once per gradient_accumulation_steps * num_iterations
+            # This matches the parent class behavior in TRL 0.17.1
+            generate_every = (
+                self.args.gradient_accumulation_steps * self.num_iterations
             )
 
-            if mode == "train":
-                # During training, generate once per gradient_accumulation_steps * num_iterations
-                # This matches the parent class behavior in TRL 0.17.1
-                generate_every = (
-                    self.args.gradient_accumulation_steps * self.num_iterations
-                )
+            if not already_generated and (
+                self._step % generate_every == 0 or self._buffered_inputs is None
+            ):
+                # Generate completions
+                generated_outputs = self._generate_and_score_completions(inputs)
 
-                if not already_generated and (
-                    self._step % generate_every == 0 or self._buffered_inputs is None
-                ):
-                    # Generate completions
-                    generated_outputs = self._generate_and_score_completions(inputs)
+                # For context compression, we need to manually split the list-based data
+                # since split_tensor_dict expects tensors
+                num_chunks = self.args.gradient_accumulation_steps
+                batch_size = len(inputs) // num_chunks
 
-                    # For context compression, we need to manually split the list-based data
-                    # since split_tensor_dict expects tensors
-                    num_chunks = self.args.gradient_accumulation_steps
-                    batch_size = len(inputs) // num_chunks
+                self._buffered_inputs = []
+                for i in range(num_chunks):
+                    start_idx = i * batch_size
+                    end_idx = (i + 1) * batch_size
+                    chunk = {}
 
-                    self._buffered_inputs = []
-                    for i in range(num_chunks):
-                        start_idx = i * batch_size
-                        end_idx = (i + 1) * batch_size
-                        chunk = {}
+                    # Handle list-based fields (for segmented data)
+                    for key in [
+                        "prompt_ids",
+                        "prompt_mask",
+                        "completion_ids",
+                        "completion_mask",
+                    ]:
+                        if key in generated_outputs and isinstance(
+                            generated_outputs[key], list
+                        ):
+                            chunk[key] = generated_outputs[key][start_idx:end_idx]
 
-                        # Handle list-based fields (for segmented data)
-                        for key in [
-                            "prompt_ids",
-                            "prompt_mask",
-                            "completion_ids",
-                            "completion_mask",
-                        ]:
-                            if key in generated_outputs and isinstance(
-                                generated_outputs[key], list
-                            ):
-                                chunk[key] = generated_outputs[key][start_idx:end_idx]
+                    # Handle tensor fields
+                    for key in [
+                        "advantages",
+                        "old_per_token_logps",
+                        "ref_per_token_logps",
+                    ]:
+                        if key in generated_outputs:
+                            if isinstance(generated_outputs[key], torch.Tensor):
+                                chunk[key] = generated_outputs[key][
+                                    start_idx:end_idx
+                                ]
+                            else:
+                                chunk[key] = generated_outputs[key]
 
-                        # Handle tensor fields
-                        for key in [
-                            "advantages",
-                            "old_per_token_logps",
-                            "ref_per_token_logps",
-                        ]:
-                            if key in generated_outputs:
-                                if isinstance(generated_outputs[key], torch.Tensor):
-                                    chunk[key] = generated_outputs[key][
-                                        start_idx:end_idx
-                                    ]
-                                else:
-                                    chunk[key] = generated_outputs[key]
+                    # Handle other fields
+                    for key in ["compression_info"]:
+                        if key in generated_outputs:
+                            chunk[key] = generated_outputs[key][start_idx:end_idx]
 
-                        # Handle other fields
-                        for key in ["compression_info"]:
-                            if key in generated_outputs:
-                                chunk[key] = generated_outputs[key][start_idx:end_idx]
+                    self._buffered_inputs.append(chunk)
 
-                        self._buffered_inputs.append(chunk)
+            elif not already_generated:
+                # Use buffered inputs
+                pass  # self._buffered_inputs is already set
 
-                elif not already_generated:
-                    # Use buffered inputs
-                    pass  # self._buffered_inputs is already set
-
-                inputs = self._buffered_inputs[
-                    self._step % self.args.gradient_accumulation_steps
-                ]
-                self._step += 1
-            else:
-                # In evaluation mode
-                if not already_generated:
-                    inputs = self._generate_and_score_completions(inputs)
-
-            return inputs
+            inputs = self._buffered_inputs[
+                self._step % self.args.gradient_accumulation_steps
+            ]
+            self._step += 1
         else:
-            # Fall back to parent implementation for non-compression cases
-            return super()._prepare_inputs(inputs)
+            # In evaluation mode
+            if not already_generated:
+                inputs = self._generate_and_score_completions(inputs)
+
+        return inputs
+
