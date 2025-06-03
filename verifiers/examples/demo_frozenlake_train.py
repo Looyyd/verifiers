@@ -71,7 +71,6 @@ training_args = GRPOConfig(
     beta=0.001,
     max_prompt_length=512,
     max_completion_length=2048,
-    compression_threshold=0.05,  # TODO: minimal for debugging
     per_device_train_batch_size=BATCH_SIZE,
     num_generations=NUM_GENERATIONS,
     gradient_accumulation_steps=1,
@@ -101,7 +100,7 @@ trainer = GRPOFrozenLakeTrainer(
     format_reward_weight=FORMAT_REWARD_WEIGHT,
     game_reward_weight=GAME_REWARD_WEIGHT,
     max_episode_steps=MAX_EPISODE_STEPS,
-    compression_threshold=0.75,
+    compression_threshold=0.05,  # TODO: minimal for debugging
 )
 
 print(f"Starting FrozenLake GRPO training (slippery={IS_SLIPPERY})")
