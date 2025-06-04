@@ -318,11 +318,9 @@ summary here ...
         rewards = []
         # Get episode outcomes from kwargs if available
         episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
-        compression_info = kwargs.get("compression_info", [{}] * len(completions))
 
         for i, completion in enumerate(completions):
             outcome = episode_outcomes[i]
-            comp_info = compression_info[i]
 
             if outcome == "invalid_action":
                 rewards.append(-0.1)
@@ -534,13 +532,7 @@ summary here ...
         completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
         history_for_logging = [s["history_for_logging"] for s in states]
         episode_outcomes = [s["episode_outcome"] for s in states]
-        compression_info = [
-            {
-                "needed_compression": s.get("has_been_compressed", False),
-                "compression_count": s.get("compression_count", 0),
-            }
-            for s in states
-        ]
+
 
         # Clean up environments
         for env_info in self._gym_envs.values():
@@ -556,7 +548,6 @@ summary here ...
             "messages": completion_messages,
             "history_for_logging": history_for_logging,
             "episode_outcomes": episode_outcomes,
-            "compression_info": compression_info,
         }
 
     def step_frozenlake(
@@ -879,10 +870,6 @@ summary here ...
             episode_outcomes = env_result.get(
                 "episode_outcomes", [None] * len(all_prompts)
             )
-            compression_info = env_result.get(
-                "compression_info", [{}] * len(all_prompts)
-            )
-
         else:
             prompt_ids_list = [None] * len(all_prompts)
             prompt_masks_list = [None] * len(all_prompts)
@@ -891,7 +878,6 @@ summary here ...
             completion_messages = [None] * len(all_prompts)
             history_for_logging = [None] * len(all_prompts)
             episode_outcomes = [None] * len(all_prompts)
-            compression_info = [None] * len(all_prompts)
 
         # Broadcast all data
         prompt_ids_list = broadcast_object_list(prompt_ids_list, from_process=0)
@@ -903,7 +889,6 @@ summary here ...
         completion_messages = broadcast_object_list(completion_messages, from_process=0)
         history_for_logging = broadcast_object_list(history_for_logging, from_process=0)
         episode_outcomes = broadcast_object_list(episode_outcomes, from_process=0)
-        compression_info = broadcast_object_list(compression_info, from_process=0)
 
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
@@ -918,7 +903,6 @@ summary here ...
         completion_messages = completion_messages[process_slice]
         history_for_logging = history_for_logging[process_slice]
         episode_outcomes = episode_outcomes[process_slice]
-        compression_info = compression_info[process_slice]
 
         # Count total segments across all episodes locally
         local_segment_count = sum(
@@ -1061,7 +1045,6 @@ summary here ...
             reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
             # Add episode outcomes and compression info to reward kwargs
             reward_kwargs["episode_outcomes"] = episode_outcomes
-            reward_kwargs["compression_info"] = compression_info
             output_reward_func = reward_func(
                 prompts=prompts, completions=completions, **reward_kwargs
             )
@@ -1146,42 +1129,7 @@ summary here ...
                         self.state.global_step,
                     )
 
-        # Log compression-specific metrics
-        if (
-            self.log_completions
-            and self.state.global_step % self.args.logging_steps == 0
-        ):
-            # Log compression statistics
-            compression_stats = []
-            for i, comp_info in enumerate(compression_info):
-                if comp_info.get("needed_compression", False):
-                    compression_stats.append(
-                        {
-                            "episode": i,
-                            "compression_count": comp_info.get("compression_count", 0),
-                            "final_reward": (
-                                rewards_to_log[i] if i < len(rewards_to_log) else 0.0
-                            ),
-                        }
-                    )
 
-            if compression_stats and self.accelerator.is_main_process:
-                # Log average compression performance
-                avg_reward_compressed = sum(
-                    s["final_reward"] for s in compression_stats
-                ) / len(compression_stats)
-                avg_reward_uncompressed = sum(
-                    rewards_to_log[i]
-                    for i in range(len(compression_info))
-                    if not compression_info[i].get("needed_compression", False)
-                ) / max(1, len(compression_info) - len(compression_stats))
-
-                print(f"\n[Step {self.state.global_step}] Compression Statistics:")
-                print(
-                    f"  Episodes requiring compression: {len(compression_stats)}/{len(compression_info)}"
-                )
-                print(f"  Avg reward (compressed): {avg_reward_compressed:.3f}")
-                print(f"  Avg reward (uncompressed): {avg_reward_uncompressed:.3f}")
 
         return {
             "prompt_ids": (prompt_ids_list),
@@ -1191,7 +1139,6 @@ summary here ...
             "old_per_token_logps": old_per_token_logps_list,
             "ref_per_token_logps": ref_per_token_logps_list,
             "advantages": advantages,
-            "compression_info": compression_info,
         }
 
     def _compute_loss(self, model, inputs):
@@ -1535,10 +1482,7 @@ summary here ...
                             else:
                                 chunk[key] = generated_outputs[key]
 
-                    # Handle other fields
-                    for key in ["compression_info"]:
-                        if key in generated_outputs:
-                            chunk[key] = generated_outputs[key][start_idx:end_idx]
+
 
                     self._buffered_inputs.append(chunk)
 
