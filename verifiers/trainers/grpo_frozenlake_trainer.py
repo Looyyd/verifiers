@@ -685,6 +685,9 @@ summary here ...
                     }
                 )
 
+                # Get current game state
+                env_info = self._gym_envs[state["gym_env_id"]]
+
                 # If compression message is too long, stop the episode
                 # If the compression is too long, first of all it's not what we want
                 # also if it is really really long, the next prompt might be longer than max_length, which shuts down vllm
@@ -696,8 +699,6 @@ summary here ...
                     state["episode_outcome"] = "compression_too_long"
                     return j, state
 
-                # Get current game state
-                env_info = self._gym_envs[state["gym_env_id"]]
                 current_state_desc = self._state_to_description(
                     env_info["state"], env_info["grid"]
                 )
