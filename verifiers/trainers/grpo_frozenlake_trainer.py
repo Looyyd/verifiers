@@ -975,6 +975,7 @@ summary here ...
 
                     with torch.no_grad():
                         # Compute old log probs (if num_iterations > 1)
+                        # TODO: could refactor this duplicate code with _compute_loss
                         if self.num_iterations > 1:
                             old_logps = self._get_per_token_logps(
                                 self.model,
@@ -1019,10 +1020,11 @@ summary here ...
             ref_per_token_logps_list.append(episode_ref_logps)
 
         # CRITICAL: Process dummy segments to match global max
+        # this ensures same computation graph across all gpus
         while segment_idx_global < max_segment_count:
-            # Create dummy tensors for forward pass
+            # Create dummy tensors for forward pass, with 0 mask they will be ignored
             dummy_input = torch.zeros(1, 10, device=device, dtype=torch.long)
-            dummy_mask = torch.ones(1, 10, device=device, dtype=torch.long)
+            dummy_mask = torch.zeros(1, 10, device=device, dtype=torch.long)
 
             with torch.no_grad():
                 if self.num_iterations > 1:
@@ -1321,20 +1323,9 @@ summary here ...
             old_per_token_logps = pad(old_per_token_logps, padding_value=0.0)
             # Ensure shape matches completion_ids
             if old_per_token_logps.shape[1] != completion_ids.shape[1]:
-                # Pad or truncate to match
-                target_len = completion_ids.shape[1]
-                current_len = old_per_token_logps.shape[1]
-                if current_len < target_len:
-                    padding = torch.zeros(
-                        old_per_token_logps.shape[0],
-                        target_len - current_len,
-                        device=device,
-                    )
-                    old_per_token_logps = torch.cat(
-                        [old_per_token_logps, padding], dim=1
-                    )
-                else:
-                    old_per_token_logps = old_per_token_logps[:, :target_len]
+                raise ValueError(
+                    f"Old per token logps shape {old_per_token_logps.shape[1]} does not match completion_ids shape {completion_ids.shape[1]}"
+                )
         else:
             old_per_token_logps = None
 
@@ -1346,20 +1337,9 @@ summary here ...
             ref_per_token_logps = pad(ref_per_token_logps, padding_value=0.0)
             # Ensure shape matches completion_ids
             if ref_per_token_logps.shape[1] != completion_ids.shape[1]:
-                # Pad or truncate to match
-                target_len = completion_ids.shape[1]
-                current_len = ref_per_token_logps.shape[1]
-                if current_len < target_len:
-                    padding = torch.zeros(
-                        ref_per_token_logps.shape[0],
-                        target_len - current_len,
-                        device=device,
-                    )
-                    ref_per_token_logps = torch.cat(
-                        [ref_per_token_logps, padding], dim=1
-                    )
-                else:
-                    ref_per_token_logps = ref_per_token_logps[:, :target_len]
+                raise ValueError(
+                    f"Ref per token logps shape {ref_per_token_logps.shape[1]} does not match completion_ids shape {completion_ids.shape[1]}"
+                )
         else:
             ref_per_token_logps = None
 
