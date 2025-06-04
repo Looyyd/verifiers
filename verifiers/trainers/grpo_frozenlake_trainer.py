@@ -449,7 +449,6 @@ summary here ...
                 # Track conversation segments for proper loss computation
                 "conversation_segments": [],
                 "current_segment_start": 0,  # Track where current segment starts in completion_ids
-                "initial_prompt_ids": None,  # Store the initial prompt_ids for segment creation
                 "history_for_logging": deepcopy(m),  # Keep full history for logging
             }
             states.append(state)
@@ -475,11 +474,7 @@ summary here ...
                 ]
 
                 # Use the current prompt_ids for this segment
-                segment_prompt_ids = (
-                    state["prompt_ids"]
-                    if state["prompt_ids"]
-                    else state.get("initial_prompt_ids", [])
-                )
+                segment_prompt_ids = state["prompt_ids"]
 
                 if (
                     segment_completion_ids and segment_prompt_ids
@@ -607,9 +602,6 @@ summary here ...
             # Initialize prompt_ids on first call
             if len(state["prompt_ids"]) == 0:
                 state["prompt_ids"] = llm_response.prompt_token_ids
-                # Store initial prompt_ids if not already stored
-                if state["initial_prompt_ids"] is None:
-                    state["initial_prompt_ids"] = list(llm_response.prompt_token_ids)
 
             # Add assistant message
             assistant_msg = {
@@ -671,11 +663,7 @@ summary here ...
                 ]
 
                 # Use the current prompt_ids for this segment
-                segment_prompt_ids = (
-                    state["prompt_ids"]
-                    if state["prompt_ids"]
-                    else state.get("initial_prompt_ids", [])
-                )
+                segment_prompt_ids = state["prompt_ids"]
 
                 state["conversation_segments"].append(
                     {
