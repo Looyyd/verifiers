@@ -1210,12 +1210,6 @@ summary here ...
 
         device = self.accelerator.device
 
-        if DEBUG:
-            rank = self.accelerator.process_index
-            print(f"[Rank {rank}] Starting _compute_loss on device {device}")
-            print(f"[Rank {rank}] Input keys: {inputs.keys()}")
-            print(f"[Rank {rank}] Number of episodes: {len(inputs['prompt_ids'])}")
-
         # Step 1: Flatten all segments locally
         all_prompt_ids = []
         all_prompt_masks = []
@@ -1235,10 +1229,6 @@ summary here ...
             inputs.get("ref_per_token_logps") is not None
             and inputs["ref_per_token_logps"]
         )
-
-        if DEBUG:
-            print(f"[Rank {rank}] Has precomputed old_logps: {has_old_logps}")
-            print(f"[Rank {rank}] Has precomputed ref_logps: {has_ref_logps}")
 
         for episode_idx in range(len(inputs["prompt_ids"])):
             episode_advantage = inputs["advantages"][episode_idx]
@@ -1374,18 +1364,11 @@ summary here ...
         if old_per_token_logps is None:
             with torch.no_grad():
                 if self.num_iterations > 1:
-                    if DEBUG:
-                        print(
-                            f"[Rank {rank}] Computing old log probs (not precomputed)"
-                        )
                     old_per_token_logps = self._get_per_token_logps(
                         self.model, input_ids, attention_mask, logits_to_keep
                     )
                 else:
                     old_per_token_logps = per_token_logps.detach()
-        else:
-            if DEBUG:
-                print(f"[Rank {rank}] Using precomputed old log probs")
 
         # Compute KL divergence if needed
         if self.beta != 0.0:
@@ -1393,10 +1376,6 @@ summary here ...
             if ref_per_token_logps is None:
                 with torch.no_grad():
                     if self.ref_model is not None:
-                        if DEBUG:
-                            print(
-                                f"[Rank {rank}] Computing ref log probs (not precomputed)"
-                            )
                         ref_per_token_logps = self._get_per_token_logps(
                             self.ref_model, input_ids, attention_mask, logits_to_keep
                         )
@@ -1407,10 +1386,6 @@ summary here ...
                             ref_per_token_logps = self._get_per_token_logps(
                                 self.model, input_ids, attention_mask, logits_to_keep
                             )
-            else:
-                if DEBUG:
-                    print(f"[Rank {rank}] Using precomputed ref log probs")
-
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps)
                 - (ref_per_token_logps - per_token_logps)
@@ -1421,57 +1396,19 @@ summary here ...
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
 
-        if DEBUG:
-            print(f"[Rank {rank}] Loss computation:")
-            print(
-                f"[Rank {rank}]   epsilon_low: {self.epsilon_low}, epsilon_high: {self.epsilon_high}"
-            )
-            print(
-                f"[Rank {rank}]   coef_1 min/max: {coef_1.min().item():.4f} / {coef_1.max().item():.4f}"
-            )
-            print(
-                f"[Rank {rank}]   coef_2 min/max: {coef_2.min().item():.4f} / {coef_2.max().item():.4f}"
-            )
-
         per_token_loss1 = coef_1 * advantages.unsqueeze(1)
         per_token_loss2 = coef_2 * advantages.unsqueeze(1)
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
 
-        if DEBUG:
-            print(f"[Rank {rank}] per_token_loss shape: {per_token_loss.shape}")
-            print(
-                f"[Rank {rank}] per_token_loss min/max: {per_token_loss.min().item():.4f} / {per_token_loss.max().item():.4f}"
-            )
-
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
-
-            if DEBUG:
-                print(
-                    f"[Rank {rank}] Added KL penalty, new per_token_loss min/max: {per_token_loss.min().item():.4f} / {per_token_loss.max().item():.4f}"
-                )
 
         # Apply valid segment mask to exclude padding from loss
         # Expand valid_segment_mask to match token dimension
         valid_mask_expanded = valid_segment_mask.unsqueeze(1).expand_as(completion_mask)
         masked_completion_mask = completion_mask * valid_mask_expanded
 
-        if DEBUG:
-            print(f"[Rank {rank}] Masking:")
-            print(
-                f"[Rank {rank}]   completion_mask sum: {completion_mask.sum().item()}"
-            )
-            print(
-                f"[Rank {rank}]   masked_completion_mask sum: {masked_completion_mask.sum().item()}"
-            )
-            print(
-                f"[Rank {rank}]   valid_mask_expanded shape: {valid_mask_expanded.shape}"
-            )
-
         # Compute final loss based on loss type
-        if DEBUG:
-            print(f"[Rank {rank}] Computing final loss (loss_type={self.loss_type})...")
-
         if self.loss_type == "grpo":
             loss = (
                 (per_token_loss * completion_mask).sum(-1)
@@ -1488,29 +1425,15 @@ summary here ...
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
-        if DEBUG:
-            print(f"[Rank {rank}] Final loss: {loss.item():.6f}")
-
         # Log metrics (only for valid segments)
         mode = "eval" if self.control.should_evaluate else "train"
-
-        if DEBUG:
-            print(f"[Rank {rank}] Logging metrics (mode={mode})...")
 
         if self.beta != 0.0 and masked_completion_mask.sum() > 0:
             mean_kl = (
                 per_token_kl * masked_completion_mask
             ).sum() / masked_completion_mask.sum()
 
-            if DEBUG:
-                print(f"[Rank {rank}] Before KL gather: mean_kl = {mean_kl.item():.4f}")
-
             gathered_kl = self.accelerator.gather_for_metrics(mean_kl)
-
-            if DEBUG:
-                print(
-                    f"[Rank {rank}] After KL gather: gathered_kl shape = {gathered_kl.shape}"
-                )
 
             self._metrics[mode]["kl"].append(gathered_kl.nanmean().item())
 
@@ -1534,12 +1457,6 @@ summary here ...
                 is_region_clipped * masked_completion_mask
             ).sum() / masked_completion_mask.sum()
 
-            if DEBUG:
-                print(f"[Rank {rank}] Clipping metrics before gather:")
-                print(f"[Rank {rank}]   low_clip: {low_clip.item():.4f}")
-                print(f"[Rank {rank}]   high_clip: {high_clip.item():.4f}")
-                print(f"[Rank {rank}]   clip_ratio: {clip_ratio.item():.4f}")
-
             gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
             self._metrics[mode]["clip_ratio/low_mean"].append(
                 gathered_low_clip.nanmean().item()
@@ -1560,18 +1477,6 @@ summary here ...
             self._metrics[mode]["clip_ratio/region_mean"].append(
                 gathered_clip_ratio.nanmean().item()
             )
-
-            if DEBUG:
-                print(f"[Rank {rank}] After all gather operations completed")
-        else:
-            if DEBUG:
-                print(
-                    f"[Rank {rank}] WARNING: masked_completion_mask.sum() = 0, skipping clipping metrics"
-                )
-
-        if DEBUG:
-            print(f"[Rank {rank}] Returning loss: {loss.item():.6f}")
-            print(f"[Rank {rank}] =================================")
 
         return loss
 
