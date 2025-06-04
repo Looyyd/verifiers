@@ -686,8 +686,10 @@ summary here ...
                 )
 
                 # If compression message is too long, stop the episode
+                # If the compression is too long, first of all it's not what we want
+                # also if it is really really long, the next prompt might be longer than max_length, which shuts down vllm
                 # TODO: put as constant
-                # TODO: add rewards to state to add negative reward here
+                # TODO: add rewards to state to add negative reward here, instead of having to check outcome
                 if len(summary_text) > 1000:
                     env_info["done"] = True
                     state["completed"] = True
