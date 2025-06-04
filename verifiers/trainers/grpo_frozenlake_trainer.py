@@ -873,10 +873,12 @@ summary here ...
                         ],
                         dim=1,
                     )
+                    # TODO: i am not even sure if this has to be passed? shouldn't all ones just be the default?
+                    # For attention mask: ALL real tokens should be 1, only padding should be 0
                     attention_mask_segment = torch.cat(
                         [
-                            prompt_mask_segment.unsqueeze(0),
-                            completion_mask_segment.unsqueeze(0),
+                            torch.ones_like(prompt_mask_segment).unsqueeze(0),
+                            torch.ones_like(completion_mask_segment).unsqueeze(0),
                         ],
                         dim=1,
                     )
@@ -1205,7 +1207,11 @@ summary here ...
 
         # Concatenate prompt and completion
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        # TODO: i am not even sure if this has to be passed? shouldn't all ones just be the default?
+        # For attention mask: ALL real tokens should be 1, only padding should be 0
+        attention_mask = torch.cat(
+            [torch.ones_like(prompt_mask), torch.ones_like(completion_mask)], dim=1
+        )
         logits_to_keep = completion_ids.size(1)
 
         # Compute per-token log probabilities
