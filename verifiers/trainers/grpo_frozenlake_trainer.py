@@ -770,6 +770,11 @@ summary here ...
                             len(state["completion_ids"])
                             - state["current_segment_start"]
                         )
+                        if DEBUG:
+                            print(f"Current segment length: {current_segment_length}")
+                            print(
+                                f"Compression threshold * max_completion_length: {self.compression_threshold * self.max_completion_length}"
+                            )
                         if (
                             current_segment_length
                             >= self.compression_threshold * self.max_completion_length
