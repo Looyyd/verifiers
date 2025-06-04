@@ -442,8 +442,6 @@ summary here ...
                 "episode_outcome": None,  # Track outcome for reward functions
                 # Context compression tracking
                 "is_compressing": False,
-                "has_been_compressed": False,
-                "compression_count": 0,
                 # Track conversation segments for proper loss computation
                 "conversation_segments": [],
                 "current_segment_start": 0,  # Track where current segment starts in completion_ids
@@ -701,8 +699,6 @@ summary here ...
                 # Update state for new segment
                 state["messages"] = new_messages
                 state["is_compressing"] = False
-                state["has_been_compressed"] = True
-                state["compression_count"] += 1
                 state["current_segment_start"] = len(
                     state["completion_ids"]
                 )  # Mark start of new segment
