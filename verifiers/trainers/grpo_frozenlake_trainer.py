@@ -433,19 +433,16 @@ summary here ...
             state = {
                 "messages": m,
                 "prompt_messages": len(m),
-                "prompt_ids": [],
+                # Changed: Direct 2D lists instead of flat lists + segments
+                "prompt_ids_list": [[]],  # List of lists for each segment
+                "completion_ids_list": [[]],  # List of lists for each segment
+                "completion_masks_list": [[]],  # List of lists for each segment
                 "completed": False,
-                "completion_ids": [],
-                "completion_mask": [],
                 "gym_env_id": env_id,
                 "steps": 0,
-                "episode_outcome": None,  # Track outcome for reward functions
-                # Context compression tracking
+                "episode_outcome": None,
                 "is_compressing": False,
-                # Track conversation segments for proper loss computation
-                "conversation_segments": [],
-                "current_segment_start": 0,  # Track where current segment starts in completion_ids
-                "history_for_logging": deepcopy(m),  # Keep full history for logging
+                "history_for_logging": deepcopy(m),
             }
             states.append(state)
 
@@ -457,80 +454,35 @@ summary here ...
             states = self.step_frozenlake(states, llm, sampling_params)
             all_completed = all(state["completed"] for state in states)
 
-        # Add the final segment.
+        # Verify we have segments for each episode
         for state in states:
-            # Always capture the final segment if there are any completion tokens
-            if state["current_segment_start"] < len(state["completion_ids"]):
-                # Add the final segment
-                segment_completion_ids = state["completion_ids"][
-                    state["current_segment_start"] :
-                ]
-                segment_completion_mask = state["completion_mask"][
-                    state["current_segment_start"] :
-                ]
-
-                # Use the current prompt_ids for this segment
-                segment_prompt_ids = state["prompt_ids"]
-
-                if (
-                    segment_completion_ids and segment_prompt_ids
-                ):  # Only add if we have both
-                    state["conversation_segments"].append(
-                        {
-                            "prompt_ids": segment_prompt_ids,
-                            "completion_ids": segment_completion_ids,
-                            "completion_mask": segment_completion_mask,
-                        }
-                    )
-                else:
-                    # This shouldn't happen
-                    raise RuntimeError(f"WARNING: Missing data for segment creation")
-
-            else:
-                raise RuntimeError(
-                    f"WARNING: Episode completed with no segments captured. "
-                    f"completion_ids length: {len(state['completion_ids'])}, "
-                    f"current_segment_start: {state['current_segment_start']}"
-                )
-
-        # Return arrays of segments for each episode
-        all_prompt_ids = []
-        all_prompt_masks = []
-        all_completion_ids = []
-        all_completion_masks = []
-
-        for state in states:
-            # Extract segments
-            episode_prompt_ids = []
-            episode_prompt_masks = []
-            episode_completion_ids = []
-            episode_completion_masks = []
-
-            for segment in state["conversation_segments"]:
-                episode_prompt_ids.append(segment["prompt_ids"])
-                episode_completion_ids.append(segment["completion_ids"])
-                episode_completion_masks.append(segment["completion_mask"])
-                # Create prompt mask of all 1s
-                episode_prompt_masks.append([1] * len(segment["prompt_ids"]))
-
-            # Ensure we have at least one segment per episode
-            if not episode_prompt_ids:
-                # This should not happen if the logic above is correct
+            # Check that we have at least one segment with content
+            if not any(state["completion_ids_list"]) or not any(
+                state["prompt_ids_list"]
+            ):
                 raise RuntimeError(
                     f"Episode completed with no segments captured. "
-                    f"completion_ids length: {len(state['completion_ids'])}, "
-                    f"current_segment_start: {state['current_segment_start']}"
+                    f"completion_ids_list: {state['completion_ids_list']}, "
+                    f"prompt_ids_list: {state['prompt_ids_list']}"
                 )
 
-            all_prompt_ids.append(episode_prompt_ids)
+        # Extract the 2D lists directly - no need for conversion
+        all_prompt_ids = [state["prompt_ids_list"] for state in states]
+        all_completion_ids = [state["completion_ids_list"] for state in states]
+        all_completion_masks = [state["completion_masks_list"] for state in states]
+
+        # Create prompt masks (all 1s)
+        all_prompt_masks = []
+        for state in states:
+            episode_prompt_masks = []
+            for prompt_ids in state["prompt_ids_list"]:
+                if prompt_ids:  # Only create mask for non-empty segments
+                    episode_prompt_masks.append([1] * len(prompt_ids))
             all_prompt_masks.append(episode_prompt_masks)
-            all_completion_ids.append(episode_completion_ids)
-            all_completion_masks.append(episode_completion_masks)
 
         completion_messages = [s["messages"][s["prompt_messages"] :] for s in states]
         history_for_logging = [s["history_for_logging"] for s in states]
         episode_outcomes = [s["episode_outcome"] for s in states]
-
 
         # Clean up environments
         for env_info in self._gym_envs.values():
@@ -588,9 +540,9 @@ summary here ...
 
             state = deepcopy(states[j])
 
-            # Initialize prompt_ids on first call
-            if len(state["prompt_ids"]) == 0:
-                state["prompt_ids"] = llm_response.prompt_token_ids
+            # Initialize prompt_ids for current segment on first call
+            if len(state["prompt_ids_list"][-1]) == 0:
+                state["prompt_ids_list"][-1] = llm_response.prompt_token_ids
 
             # Add assistant message
             assistant_msg = {
@@ -598,27 +550,29 @@ summary here ...
                 "content": llm_response.outputs[0].text,
             }
             state["messages"].append(assistant_msg)
-            state["history_for_logging"].append(
-                assistant_msg
-            )  # Also add to logging history
+            state["history_for_logging"].append(assistant_msg)
 
-            # Update token tracking - APPEND, don't overwrite
-            total_prev_len = len(state["prompt_ids"]) + len(state["completion_ids"])
-            env_response_len = len(list(llm_response.prompt_token_ids)) - total_prev_len
+            # Update token tracking - append to current segment (last list)
+            # Calculate lengths considering all segments
+            total_prev_len = len(state["prompt_ids_list"][-1]) + len(
+                state["completion_ids_list"][-1]
+            )
+            # In multiturn conversation, the prompt of the llm response will contain all previous exchanges + the new user message we added
+            user_message_len = len(list(llm_response.prompt_token_ids)) - total_prev_len
             new_completion_len = len(llm_response.outputs[0].token_ids)
 
-            # Extend completion masks
-            state["completion_mask"].extend(
-                [0] * env_response_len
-            )  # Environment tokens masked
-            state["completion_mask"].extend(
+            # Extend completion masks for current segment(to only backpropagate on generated tokens, not user message)
+            state["completion_masks_list"][-1].extend(
+                [0] * user_message_len
+            )  # User message tokens masked
+            state["completion_masks_list"][-1].extend(
                 [1] * new_completion_len
-            )  # Assistant tokens not masked
+            )  # Assistant message tokens not masked
 
-            # Extend completion ids - don't overwrite!
+            # Extend completion ids for current segment
             new_tokens = list(llm_response.prompt_token_ids)[total_prev_len:]
             new_tokens.extend(list(llm_response.outputs[0].token_ids))
-            state["completion_ids"].extend(new_tokens)
+            state["completion_ids_list"][-1].extend(new_tokens)
 
             # Handle compression response
             if state.get("is_compressing", False):
@@ -632,35 +586,12 @@ summary here ...
                     # Extract content after </think>
                     summary_text = summary_text.split("</think>", 1)[1].strip()
                 else:
-                    # Empty summary if no think tags
-                    # Optionally, we could add a small penalty for not using think tags
-                    # This could be tracked and used in the format reward function
                     state["compression_missing_think"] = True
                     summary_text = ""
 
                 # Ensure we have some summary text
                 if not summary_text.strip():
-                    # Fallback to a minimal summary if empty
                     summary_text = "Previous conversation summary unavailable."
-
-                # Save current segment before compression
-                segment_completion_ids = state["completion_ids"][
-                    state["current_segment_start"] :
-                ]
-                segment_completion_mask = state["completion_mask"][
-                    state["current_segment_start"] :
-                ]
-
-                # Use the current prompt_ids for this segment
-                segment_prompt_ids = state["prompt_ids"]
-
-                state["conversation_segments"].append(
-                    {
-                        "prompt_ids": segment_prompt_ids,
-                        "completion_ids": segment_completion_ids,
-                        "completion_mask": segment_completion_mask,
-                    }
-                )
 
                 # Get current game state
                 env_info = self._gym_envs[state["gym_env_id"]]
@@ -696,15 +627,14 @@ summary here ...
                     {"role": "user", "content": compressed_user_msg}
                 )
 
-                # Update state for new segment
+                # Update state for new segment - append new empty lists
                 state["messages"] = new_messages
                 state["is_compressing"] = False
-                state["current_segment_start"] = len(
-                    state["completion_ids"]
-                )  # Mark start of new segment
 
-                # Reset prompt_ids for the new segment
-                state["prompt_ids"] = []  # Will be set on next LLM call
+                # Create new segment by appending empty lists
+                state["prompt_ids_list"].append([])
+                state["completion_ids_list"].append([])
+                state["completion_masks_list"].append([])
 
                 # Don't increment steps for compression
                 return j, state
@@ -742,15 +672,8 @@ summary here ...
                             state["episode_outcome"] = "fell_in_hole"
                     else:
                         # Check if we need compression
-                        current_segment_length = (
-                            len(state["completion_ids"])
-                            - state["current_segment_start"]
-                        )
-                        if DEBUG:
-                            print(f"Current segment length: {current_segment_length}")
-                            print(
-                                f"Compression threshold * max_completion_length: {self.compression_threshold * self.max_completion_length}"
-                            )
+                        current_segment_length = len(state["completion_ids_list"][-1])
+
                         if (
                             current_segment_length
                             >= self.compression_threshold * self.max_completion_length
@@ -770,7 +693,7 @@ summary here ...
                             )
                             state["is_compressing"] = True
                         else:
-                            # If don't need compression continue episode - add next state
+                            # Continue episode - add next state
                             env_msg = {
                                 "role": "user",
                                 "content": self._state_to_description(
@@ -1125,8 +1048,6 @@ summary here ...
                         self.state.global_step,
                     )
 
-
-
         return {
             "prompt_ids": (prompt_ids_list),
             "prompt_mask": (prompt_masks_list),
@@ -1477,8 +1398,6 @@ summary here ...
                                 chunk[key] = generated_outputs[key][start_idx:end_idx]
                             else:
                                 chunk[key] = generated_outputs[key]
-
-
 
                     self._buffered_inputs.append(chunk)
 
