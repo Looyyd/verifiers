@@ -44,7 +44,6 @@ from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
 DEBUG = True
-MAX_COMPRESSIONS = 3
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
@@ -326,6 +325,10 @@ summary here ...
             comp_info = compression_info[i]
 
             if outcome == "invalid_action":
+                rewards.append(-0.1)
+                continue
+
+            if outcome == "compression_too_long":
                 rewards.append(-0.1)
                 continue
 
@@ -682,6 +685,15 @@ summary here ...
                     }
                 )
 
+                # If compression message is too long, stop the episode
+                # TODO: put as constant
+                # TODO: add rewards to state to add negative reward here
+                if len(summary_text) > 1000:
+                    env_info["done"] = True
+                    state["completed"] = True
+                    state["episode_outcome"] = "compression_too_long"
+                    return j, state
+
                 # Get current game state
                 env_info = self._gym_envs[state["gym_env_id"]]
                 current_state_desc = self._state_to_description(
@@ -759,9 +771,7 @@ summary here ...
                         if (
                             current_segment_length
                             >= self.compression_threshold * self.max_completion_length
-                            and state["compression_count"] < MAX_COMPRESSIONS
-                        ):  # Limit compressions to avoid infinite loops
-
+                        ):
                             # Add compression prompt
                             state["messages"].append(
                                 {
@@ -777,7 +787,7 @@ summary here ...
                             )
                             state["is_compressing"] = True
                         else:
-                            # Continue episode - add next state
+                            # If don't need compression continue episode - add next state
                             env_msg = {
                                 "role": "user",
                                 "content": self._state_to_description(
