@@ -22,6 +22,7 @@ from .utils.logging_utils import setup_logging, print_prompt_completions_sample
 from .trainers.grpo_env_standalone_trainer import GRPODoubleCheckTrainer
 from .gym_envs.connectfour import ConnectFourEnv
 from .gym_envs.connectfour.players import ChildPlayer, Player
+from .trainers.grpo_connectfour_trainer import GRPOConnectFourTrainer
 
 
 __version__ = "0.1.0"
@@ -51,4 +52,5 @@ __all__ = [
     "ConnectFourEnv",
     "ChildPlayer",
     "Player",
+    "GRPOConnectFourTrainer",
 ]

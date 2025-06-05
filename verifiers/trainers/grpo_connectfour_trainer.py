@@ -42,29 +42,21 @@ if is_wandb_available():
     import wandb
 
 # Add gymnasium import
-import gymnasium as gym
-from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
 DEBUG = False
 
-# Grid distribution configuration
-DEFAULT_GRID_DISTRIBUTION = {
-    2: 0.2,  # 2x2 grids: 33.3%
-    3: 0.3,  # 3x3 grids: 33.3%
-    4: 0.5,  # 4x4 grids: 33.3%
-}
 
-
-class GRPOFrozenLakeTrainer(GRPOTrainer):
+class GRPOConnectFourTrainer(GRPOTrainer):
     """
-    A GRPO trainer specifically for FrozenLake environment.
+    A GRPO trainer specifically for Connect Four environment.
     Inherits directly from GRPOTrainer to allow custom modifications.
 
     This trainer extends GRPOTrainer with:
-    - Multi-turn FrozenLake environment interaction
+    - Multi-turn Connect Four environment interaction
     - Custom reward functions for format compliance and game success
     - Context compression for long episodes
+    - Support for playing against various opponents
     """
 
     def __init__(
@@ -77,14 +69,12 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
             Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]
         ] = (None, None),
         peft_config: Optional["PeftConfig"] = None,
-        # FrozenLake specific parameters
-        is_slippery: bool = False,
-        grid_distribution: Optional[Dict[int, float]] = None,
+        # Connect Four specific parameters
+        opponent_player=None,  # Default to ChildPlayer if None
         n_initial_samples: int = 100,
         format_reward_weight: float = 1.0,
         game_reward_weight: float = 10.0,
-        max_episode_steps: int = 50,  # TODO: this could be handled by env, right now we count the steps which is not really needed?
-        frozen_tile_probability: float = 0.8,
+        max_episode_steps: int = 42,  # Maximum possible moves in Connect Four
         # Context compression parameters
         compression_threshold: float = 0.75,
         compression_prompt_template: str = (
@@ -96,15 +86,15 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
         **kwargs,
     ):
         if not args.use_vllm:  # type: ignore
-            raise ValueError("vLLM must be enabled for GRPOFrozenLakeTrainer")
+            raise ValueError("vLLM must be enabled for GRPOConnectFourTrainer")
 
-        # FrozenLake configuration
-        self.is_slippery = is_slippery
-        self.grid_distribution = grid_distribution or DEFAULT_GRID_DISTRIBUTION
+        # Connect Four configuration
+        self.opponent_player = (
+            opponent_player if opponent_player is not None else ChildPlayer()
+        )
         self.format_reward_weight = format_reward_weight
         self.game_reward_weight = game_reward_weight
         self.max_episode_steps = max_episode_steps
-        self.frozen_tile_probability = frozen_tile_probability
 
         # Context compression configuration
         self.compression_threshold = compression_threshold
@@ -115,57 +105,36 @@ class GRPOFrozenLakeTrainer(GRPOTrainer):
             raise ValueError(
                 f"compression_threshold must be between 0 and 1, got {self.compression_threshold}"
             )
-        # TODO: could refactor this, sometimes compression will be without a prompt, just reset the history!
         if not self.compression_prompt_template:
             raise ValueError(
                 "compression_prompt_template cannot be empty when using context compression"
             )
 
-        # Validate grid distribution
-        total_prob = sum(self.grid_distribution.values())
-        if abs(total_prob - 1.0) > 1e-6:
-            raise ValueError(
-                f"Grid distribution probabilities must sum to 1.0, got {total_prob}"
-            )
+        # Define system prompt for Connect Four
+        self.system_prompt = """You are playing Connect Four. In this game, you and your opponent take turns dropping pieces into a 7-column board. The first player to get 4 pieces in a row (horizontally, vertically, or diagonally) wins.
 
-        # Define system prompt
-        self.system_prompt = """You are playing a game called frozen lake. 
-In this game you move around a grid, and you win when the Agent reaches the Goal. If you fall into a hole, you lose.
-You will be given grids by the user, propose the best move.
+The board is represented as a 6x7 grid:
+- .: Empty space
+- X: Your pieces
+- O: Opponent's pieces
 
-The Legend is:
-A: Agent
-S: Start
-F: Frozen
-H: Hole
-G: Goal
-
-Possible moves are:
-0: LEFT
-1: DOWN
-2: RIGHT
-3: UP
+Columns are numbered 0-6 from left to right.
 
 # Action response format
 You should think about your move first using <think></think> tags, then give your final answer.
-Put your final answer in \\boxed{}, for example \\boxed{0} for LEFT, \\boxed{1} for DOWN, etc.
+Put your final answer in \\boxed{}, for example \\boxed{0} for column 0, \\boxed{3} for column 3, etc.
 
 Example format:
 <think>
-I need to analyze the current state and find the best path to the goal while avoiding holes...
+I need to analyze the board. My opponent has three pieces in a row horizontally, so I should block them...
 </think>
 
-\\boxed{2}
+\\boxed{4}
 
 # Summarization format
 You might also be asked to summarize the conversation so far.
 In that case you should use the <think> tags to organize your thoughts, then put the summary outside the <think> tags.
 
-Example format:
-<think>
-I need to summarize the conversation so far...
-</think>
-summary here ...
 """
 
         # Store gym environments indexed by a unique ID
@@ -177,7 +146,7 @@ summary here ...
         self.sleep_time = kwargs.pop("sleep_time", 0.01)
         self.scale_rewards = kwargs.pop("scale_rewards", True)
 
-        # Create initial dataset (after system_prompt is defined)
+        # Create initial dataset
         train_dataset = self._create_initial_dataset(n_initial_samples)
 
         # Define reward functions
@@ -223,26 +192,27 @@ summary here ...
             spaces_between_special_tokens=False,
         )
 
-    def _sample_grid_size(self) -> int:
-        """Sample a grid size based on the grid distribution."""
-        sizes = list(self.grid_distribution.keys())
-        probabilities = list(self.grid_distribution.values())
-        return np.random.choice(sizes, p=probabilities)
-
     def _create_initial_dataset(self, n_samples: int) -> Dataset:
-        """Create a dataset with initial FrozenLake states."""
+        """Create a dataset with initial Connect Four states."""
         data = []
         for i in range(n_samples):
-            # Sample a grid size
-            grid_size = self._sample_grid_size()
+            # All games start with an empty board
+            initial_board = np.zeros((6, 7), dtype=int)
 
-            # Generate a random map for this size
-            map_desc = generate_random_map(
-                size=grid_size, p=self.frozen_tile_probability
-            )
+            # Randomly decide who goes first
+            player_goes_first = random.choice([True, False])
+
+            if not player_goes_first:
+                # Opponent moves first
+                opponent_move = self.opponent_player.play(initial_board)
+                # Apply opponent's move (opponent is -1 from the board's perspective)
+                for row in range(5, -1, -1):
+                    if initial_board[row, opponent_move] == 0:
+                        initial_board[row, opponent_move] = -1
+                        break
 
             # Get initial state description
-            initial_prompt = self._get_initial_state_description_from_map(map_desc)
+            initial_prompt = self._board_to_description(initial_board)
 
             # Add system prompt and initial state
             messages = []
@@ -253,60 +223,46 @@ summary here ...
             data.append(
                 {
                     "prompt": messages,
-                    "map_desc": map_desc,  # Store the map description for later use
-                    "grid_size": grid_size,
+                    "player_goes_first": player_goes_first,
                 }
             )
         return Dataset.from_list(data)
 
-    def _get_initial_state_description_from_map(self, map_desc: List[str]) -> str:
-        """Get description of initial state from a map description."""
-        # Convert map description to grid
-        grid = [list(row) for row in map_desc]
+    def _board_to_description(self, board: np.ndarray) -> str:
+        """Convert board state to text description."""
+        desc = "Current board state:\n"
+        desc += "Columns: 0 1 2 3 4 5 6\n"
+        desc += "       -------------\n"
 
-        # Agent starts at position 0 (top-left) which should be 'S'
-        return self._state_to_description(0, grid)
+        for row in range(6):
+            desc += f"Row {row}: "
+            for col in range(7):
+                if board[row, col] == 0:
+                    desc += ". "
+                elif board[row, col] == 1:
+                    desc += "X "  # Player's pieces
+                else:
+                    desc += "O "  # Opponent's pieces
+            desc += "\n"
 
-    def _get_grid_from_env(self, env: gym.Env) -> List[List[str]]:
-        """Extract grid layout from gymnasium environment."""
-        desc = env.unwrapped.desc
-        # Convert bytes to strings if necessary
-        if isinstance(desc[0][0], bytes):
-            grid = [[cell.decode("utf-8") for cell in row] for row in desc]
-        else:
-            grid = [[str(cell) for cell in row] for row in desc]
-        return grid
+        desc += "\nYour pieces: X\nOpponent pieces: O\nEmpty spaces: .\n"
+        desc += "\nWhat column do you want to play? (0-6)"
 
-    def _state_to_description(self, state: int, grid: List[List[str]]) -> str:
-        """Convert state number to text description."""
-        ncol = len(grid[0])
-        row = state // ncol
-        col = state % ncol
-
-        # Create display grid with agent position
-        display_grid = [row[:] for row in grid]  # Deep copy
-        display_grid[row][col] = "A"  # Agent symbol
-
-        # Format as string
-        grid_str = "Current grid state:\n"
-        for grid_row in display_grid:
-            grid_str += " ".join(grid_row) + "\n"
-
-        return grid_str
+        return desc
 
     def _parse_action(self, message: str) -> Optional[int]:
         """Parse action from assistant message in \\boxed{} format."""
         if len(message) == 0:
             return None
 
-        # Look for \boxed{X} pattern where X is a digit 0-3
+        # Look for \boxed{X} pattern where X is a digit 0-6
         pattern = r"\\boxed\{(\d)\}"
         matches = re.findall(pattern, message)
 
         if matches:
             # Take the last match in case there are multiple
             digit = matches[-1]
-            if digit in "0123":
+            if digit in "0123456":
                 return int(digit)
 
         return None
@@ -317,65 +273,20 @@ summary here ...
         completions: List[List[Dict[str, str]]],
         **kwargs: Any,
     ) -> List[float]:
-        """Reward function that checks if the response format is correct."""
+        """Reward function for correct action formatting."""
         rewards = []
-        # Get episode outcomes from kwargs if available
-        episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
 
-        for i, completion in enumerate(completions):
-            outcome = episode_outcomes[i]
-
-            if outcome == "invalid_action":
-                rewards.append(-0.1)
-                continue
-
-            if outcome == "compression_too_long":
-                rewards.append(-0.1)
-                continue
-
-            # Check the last assistant message for proper format
-            last_assistant_msg = None
-            for msg in reversed(completion):
+        for completion_list in completions:
+            # Check if any completion contains valid format
+            has_valid_format = False
+            for msg in completion_list:
                 if msg["role"] == "assistant":
-                    last_assistant_msg = msg
-                    break
+                    # Check for \boxed{} format
+                    if self._parse_action(msg["content"]) is not None:
+                        has_valid_format = True
+                        break
 
-            # We can only check the last one, because if 1 message is incorrect we end the episode
-            if last_assistant_msg is None:
-                rewards.append(-0.1)
-                continue
-
-            content = last_assistant_msg["content"]
-
-            has_thinking = bool(re.search(r"<think>.*?</think>", content, re.DOTALL))
-
-            # Check for valid boxed answer
-            action = self._parse_action(content)
-            has_valid_answer = action is not None
-
-            # Reward structure:
-            # +0.1 if has thinking tags
-            # +0.1 if has valid boxed answer
-            # 0.0 baseline for valid format
-            # -0.1 for invalid action (handled above)
-            # Additional penalty for compression without think tags
-
-            base_reward = 0.0
-            if has_thinking and has_valid_answer:
-                base_reward = 0.2  # Full credit for perfect format
-            elif has_valid_answer:
-                base_reward = 0.1  # Partial credit for answer without thinking
-            elif has_thinking:
-                base_reward = 0.05  # Small credit for thinking without valid answer
-            else:
-                base_reward = 0.0  # No bonus for poor format
-
-            # TODO: Add penalty if messages contain think tags but no compression was done
-            # Apply penalty if this was a compression response without think tags
-            # (This information would need to be passed through the episode data)
-            # For now, we'll skip this as it would require modifying the data flow
-
-            rewards.append(base_reward)
+            rewards.append(1.0 if has_valid_format else 0.0)
 
         return rewards
 
@@ -385,13 +296,21 @@ summary here ...
         completions: List[List[Dict[str, str]]],
         **kwargs: Any,
     ) -> List[float]:
-        """Reward function that returns the game rewards from FrozenLake."""
+        """Reward function that returns the game rewards from Connect Four."""
         rewards = []
         # Get episode outcomes from kwargs if available
         episode_outcomes = kwargs.get("episode_outcomes", [None] * len(completions))
 
         for outcome in episode_outcomes:
-            rewards.append(1.0 if outcome == "goal_reached" else 0.0)
+            if outcome == "won":
+                rewards.append(1.0)
+            elif outcome == "lost":
+                rewards.append(-1.0)
+            elif outcome == "draw":
+                rewards.append(0.0)
+            else:  # invalid_action, compression_too_long, error
+                # TODO: this is kinda duplicate because we also have a format reward function
+                rewards.append(-0.5)
 
         return rewards
 
@@ -400,10 +319,10 @@ summary here ...
         prompts: List[List[Dict[str, Any]]],
         llm: LLM | VLLMClient,
         sampling_params: SamplingParams,
-        map_descs: Optional[List[List[str]]] = None,
+        player_goes_first_list: Optional[List[bool]] = None,
         **kwargs: Any,
     ) -> Dict[str, List[Sequence[int]] | List[str] | List[List[Dict[str, Any]]]]:
-        """Generate multi-turn FrozenLake episodes."""
+        """Generate multi-turn Connect Four episodes."""
 
         # Initialize states
         states = []
@@ -411,41 +330,47 @@ summary here ...
             env_id = self._next_env_id
             self._next_env_id += 1
 
-            # Generate with the stored map descriptions
-            if map_descs and i < len(map_descs):
-                gym_env = gym.make(
-                    "FrozenLake-v1",
-                    desc=map_descs[i],
-                    is_slippery=self.is_slippery,
-                )
-            else:
-                raise ValueError("No map description provided")
+            # Create Connect Four environment
+            # If player_goes_first is False, set first_player=-1 so opponent moves first
+            first_player = 1 if player_goes_first_list[i] else -1
+            gym_env = ConnectFourEnv(
+                opponent=self.opponent_player,
+                render_mode=None,
+                first_player=first_player,
+            )
 
-            initial_state, _ = gym_env.reset()
-            grid = self._get_grid_from_env(gym_env)
+            # Reset will handle opponent's first move if first_player=-1
+            initial_board, _ = gym_env.reset()
 
             # Store environment
             self._gym_envs[env_id] = {
                 "env": gym_env,
-                "state": initial_state,
-                "grid": grid,
+                "board": initial_board.copy(),
                 "done": False,
                 "episode_reward": 0.0,
             }
 
+            # TODO: this is akward, because then the initial dataset is useless
+            # Update the initial message with the actual board state after reset
+            # This ensures the prompt shows the board after opponent's first move if applicable
+            updated_messages = m.copy()
+            if not player_goes_first_list[i]:
+                # Replace the user message with the actual board state
+                board_desc = self._board_to_description(initial_board)
+                updated_messages[-1] = {"role": "user", "content": board_desc}
+
             state = {
-                "messages": m,
-                "prompt_messages": len(m),
-                # Changed: Direct 2D lists instead of flat lists + segments
-                "prompt_ids_list": [[]],  # List of lists for each segment
-                "completion_ids_list": [[]],  # List of lists for each segment
-                "completion_masks_list": [[]],  # List of lists for each segment
+                "messages": updated_messages,
+                "prompt_messages": len(updated_messages),
+                "prompt_ids_list": [[]],
+                "completion_ids_list": [[]],
+                "completion_masks_list": [[]],
                 "completed": False,
                 "gym_env_id": env_id,
                 "steps": 0,
                 "episode_outcome": None,
                 "is_compressing": False,
-                "history_for_logging": deepcopy(m),
+                "history_for_logging": deepcopy(updated_messages),
             }
             states.append(state)
 
@@ -454,12 +379,11 @@ summary here ...
         while not all_completed and all(
             s["steps"] < self.max_episode_steps for s in states
         ):
-            states = self.step_frozenlake(states, llm, sampling_params)
+            states = self.step_connectfour(states, llm, sampling_params)
             all_completed = all(state["completed"] for state in states)
 
         # Verify we have segments for each episode
         for state in states:
-            # Check that we have at least one segment with content
             if not any(state["completion_ids_list"]) or not any(
                 state["prompt_ids_list"]
             ):
@@ -469,7 +393,7 @@ summary here ...
                     f"prompt_ids_list: {state['prompt_ids_list']}"
                 )
 
-        # Extract the 2D lists directly - no need for conversion
+        # Extract the 2D lists directly
         all_prompt_ids = [state["prompt_ids_list"] for state in states]
         all_completion_ids = [state["completion_ids_list"] for state in states]
         all_completion_masks = [state["completion_masks_list"] for state in states]
@@ -479,7 +403,7 @@ summary here ...
         for state in states:
             episode_prompt_masks = []
             for prompt_ids in state["prompt_ids_list"]:
-                if prompt_ids:  # Only create mask for non-empty segments
+                if prompt_ids:
                     episode_prompt_masks.append([1] * len(prompt_ids))
             all_prompt_masks.append(episode_prompt_masks)
 
@@ -503,13 +427,13 @@ summary here ...
             "episode_outcomes": episode_outcomes,
         }
 
-    def step_frozenlake(
+    def step_connectfour(
         self,
         states: List[Dict[str, Any]],
         llm: LLM | VLLMClient,
         sampling_params: SamplingParams,
     ) -> List[Dict[str, Any]]:
-        """Execute one step of FrozenLake for all active states."""
+        """Execute one step of Connect Four for all active states."""
 
         live_indices = [i for i, s in enumerate(states) if not s["completed"]]
         messages_to_step = [states[i]["messages"] for i in live_indices]
@@ -530,7 +454,6 @@ summary here ...
                 skip_special_tokens=sampling_params.skip_special_tokens,
                 spaces_between_special_tokens=sampling_params.spaces_between_special_tokens,
             )
-            # Convert response format if needed
             llm_responses = dict_to_chat_response(llm_responses).responses
         else:
             llm_responses = llm.chat(
@@ -538,7 +461,6 @@ summary here ...
             )
 
         def update_state(j, llm_response):
-            # Sleep for rate limiting
             time.sleep(self.sleep_time * random.random())
 
             state = deepcopy(states[j])
@@ -555,73 +477,52 @@ summary here ...
             state["messages"].append(assistant_msg)
             state["history_for_logging"].append(assistant_msg)
 
-            # Update token tracking - append to current segment (last list)
-            # Calculate lengths considering all segments
+            # Update token tracking
             total_prev_len = len(state["prompt_ids_list"][-1]) + len(
                 state["completion_ids_list"][-1]
             )
-            # In multiturn conversation, the prompt of the llm response will contain all previous exchanges + the new user message we added
             user_message_len = len(list(llm_response.prompt_token_ids)) - total_prev_len
             new_completion_len = len(llm_response.outputs[0].token_ids)
 
-            # Extend completion masks for current segment(to only backpropagate on generated tokens, not user message)
-            state["completion_masks_list"][-1].extend(
-                [0] * user_message_len
-            )  # User message tokens masked
-            state["completion_masks_list"][-1].extend(
-                [1] * new_completion_len
-            )  # Assistant message tokens not masked
+            # Extend completion masks
+            state["completion_masks_list"][-1].extend([0] * user_message_len)
+            state["completion_masks_list"][-1].extend([1] * new_completion_len)
 
-            # Extend completion ids for current segment
+            # Extend completion ids
             new_tokens = list(llm_response.prompt_token_ids)[total_prev_len:]
             new_tokens.extend(list(llm_response.outputs[0].token_ids))
             state["completion_ids_list"][-1].extend(new_tokens)
 
             # Handle compression response
             if state.get("is_compressing", False):
-                # Extract summary (after </think> if present)
                 summary_text = assistant_msg["content"]
-
-                # Check if the model used think tags
                 has_think_tags = "</think>" in summary_text
 
                 if has_think_tags:
-                    # Extract content after </think>
                     summary_text = summary_text.split("</think>", 1)[1].strip()
                 else:
                     state["compression_missing_think"] = True
                     summary_text = ""
 
-                # Ensure we have some summary text
                 if not summary_text.strip():
                     summary_text = "Previous conversation summary unavailable."
 
-                # Get current game state
                 env_info = self._gym_envs[state["gym_env_id"]]
 
-                # If compression message is too long, stop the episode
-                # If the compression is too long, first of all it's not what we want
-                # also if it is really really long, the next prompt might be longer than max_length, which shuts down vllm
-                # TODO: put as constant
-                # TODO: add rewards to state to add negative reward here, instead of having to check outcome
                 if len(summary_text) > 1000:
                     env_info["done"] = True
                     state["completed"] = True
                     state["episode_outcome"] = "compression_too_long"
                     return j, state
 
-                current_state_desc = self._state_to_description(
-                    env_info["state"], env_info["grid"]
-                )
+                current_board_desc = self._board_to_description(env_info["board"])
 
-                # Build new compressed user message
                 compressed_user_msg = (
-                    f"{current_state_desc}\n\n"
+                    f"{current_board_desc}\n\n"
                     f"Here is a message from a previous instance about the events in this task so far:\n"
                     f"<message>{summary_text}</message>"
                 )
 
-                # Reset messages but keep system prompt
                 new_messages = []
                 if state["messages"][0]["role"] == "system":
                     new_messages.append(state["messages"][0])
@@ -630,16 +531,14 @@ summary here ...
                     {"role": "user", "content": compressed_user_msg}
                 )
 
-                # Update state for new segment - append new empty lists
                 state["messages"] = new_messages
                 state["is_compressing"] = False
 
-                # Create new segment by appending empty lists
+                # Create new segment
                 state["prompt_ids_list"].append([])
                 state["completion_ids_list"].append([])
                 state["completion_masks_list"].append([])
 
-                # Don't increment steps for compression
                 return j, state
 
             # Parse action and execute gym step
@@ -649,7 +548,6 @@ summary here ...
             action = self._parse_action(assistant_msg["content"])
 
             if action is None:
-                # Invalid action - terminate
                 env_info["done"] = True
                 state["completed"] = True
                 state["episode_outcome"] = "invalid_action"
@@ -657,22 +555,21 @@ summary here ...
                 # Execute action in gym
                 gym_env = env_info["env"]
                 try:
-                    next_state, reward, terminated, truncated, info = gym_env.step(
-                        action
-                    )
-                    done = terminated or truncated
+                    # The environment handles opponent moves automatically
+                    next_board, reward, done, truncated, info = gym_env.step(action)
 
-                    env_info["state"] = next_state
+                    env_info["board"] = next_board.copy()
                     env_info["done"] = done
-                    env_info["episode_reward"] += reward
+                    env_info["episode_reward"] = reward
 
                     if done:
-                        # Episode completed
                         state["completed"] = True
                         if reward > 0:
-                            state["episode_outcome"] = "goal_reached"
+                            state["episode_outcome"] = "won"
+                        elif reward < 0:
+                            state["episode_outcome"] = "lost"
                         else:
-                            state["episode_outcome"] = "fell_in_hole"
+                            state["episode_outcome"] = "draw"
                     else:
                         # Check if we need compression
                         current_segment_length = len(state["completion_ids_list"][-1])
@@ -681,7 +578,6 @@ summary here ...
                             current_segment_length
                             >= self.compression_threshold * self.max_completion_length
                         ):
-                            # Add compression prompt
                             state["messages"].append(
                                 {
                                     "role": "user",
@@ -696,18 +592,15 @@ summary here ...
                             )
                             state["is_compressing"] = True
                         else:
-                            # Continue episode - add next state
+                            # Continue episode - add next board state
                             env_msg = {
                                 "role": "user",
-                                "content": self._state_to_description(
-                                    next_state, env_info["grid"]
-                                ),
+                                "content": self._board_to_description(next_board),
                             }
                             state["messages"].append(env_msg)
                             state["history_for_logging"].append(env_msg)
 
                 except Exception as e:
-                    # Error in gym step
                     state["completed"] = True
                     env_info["done"] = True
                     state["episode_outcome"] = "error"
@@ -715,9 +608,7 @@ summary here ...
                         f"Error executing action in gym environment: {str(e)}"
                     )
 
-            # Increment step counter
             state["steps"] += 1
-
             return j, state
 
         # Execute updates in parallel
@@ -768,18 +659,22 @@ summary here ...
 
         # Gather prompts for multi-turn generation
         all_prompts = gather_object(prompts)
-        # Extract map descriptions if available
-        map_descs = (
-            [x.get("map_desc") for x in inputs] if "map_desc" in inputs[0] else None
+        # Extract player_goes_first information
+        player_goes_first = (
+            [x.get("player_goes_first", True) for x in inputs]
+            if "player_goes_first" in inputs[0]
+            else None
         )
-        all_map_descs = gather_object(map_descs) if map_descs else None
+        all_player_goes_first = (
+            gather_object(player_goes_first) if player_goes_first else None
+        )
 
         if self.accelerator.is_main_process:
             env_result = self.generate_multiturn(
                 prompts=all_prompts,
                 llm=self.vllm_client,
                 sampling_params=self.sampling_params,
-                map_descs=all_map_descs,
+                player_goes_first_list=all_player_goes_first,
             )
 
             # Handle segmented data from context compression
