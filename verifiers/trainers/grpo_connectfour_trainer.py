@@ -255,13 +255,28 @@ In that case you should use the <think> tags to organize your thoughts, then put
         return desc
 
     def _parse_action(self, message: str) -> Optional[int]:
-        """Parse action from assistant message in \\boxed{} format."""
+        """Parse action from assistant message in \\boxed{} format with required <think> tags."""
         if len(message) == 0:
             return None
 
+        # Check for properly formatted <think></think> tags
+        think_pattern = r"<think>(.*?)</think>"
+        think_matches = re.search(think_pattern, message, re.DOTALL)
+
+        if not think_matches:
+            # No think tags found
+            return None
+
+        # Get the position where </think> ends
+        think_end_pos = think_matches.end()
+
         # Look for \boxed{X} pattern where X is a digit 0-6
-        pattern = r"\\boxed\{(\d)\}"
-        matches = re.findall(pattern, message)
+        # Only consider matches that appear after the </think> tag
+        boxed_pattern = r"\\boxed\{(\d)\}"
+
+        # Search only in the part of the message after </think>
+        post_think_message = message[think_end_pos:]
+        matches = re.findall(boxed_pattern, post_think_message)
 
         if matches:
             # Take the last match in case there are multiple
@@ -277,16 +292,19 @@ In that case you should use the <think> tags to organize your thoughts, then put
         completions: List[List[Dict[str, str]]],
         **kwargs: Any,
     ) -> List[float]:
-        """Reward function for correct action formatting."""
+        """Reward function for correct action formatting.
+
+        Requires both <think></think> tags and \\boxed{} format, with the
+        boxed answer appearing after the closing </think> tag.
+        """
         rewards = []
 
-        # TODO: should make <think> mandatory!
         for completion_list in completions:
             # Check if any completion contains valid format
             has_valid_format = False
             for msg in completion_list:
                 if msg["role"] == "assistant":
-                    # Check for \boxed{} format
+                    # _parse_action now checks for both think tags and \boxed{} format
                     if self._parse_action(msg["content"]) is not None:
                         has_valid_format = True
                         break
@@ -314,9 +332,8 @@ In that case you should use the <think> tags to organize your thoughts, then put
             elif outcome == "draw":
                 rewards.append(0.0)
             else:  # invalid_action, compression_too_long, error
-                # TODO: this is kinda duplicate because we also have a format reward function
-                # TODO: CAN REWARD hack, because will do an invalide action when about to lose!
-                rewards.append(-0.5)
+                # Needs to be more negative than lost to avoid reward hacking(invalid move when about to lose)
+                rewards.append(-2.0)
 
         return rewards
 
