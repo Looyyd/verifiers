@@ -231,20 +231,24 @@ In that case you should use the <think> tags to organize your thoughts, then put
     def _board_to_description(self, board: np.ndarray) -> str:
         """Convert board state to text description."""
         desc = "Current board state:\n"
-        desc += "Columns: 0 1 2 3 4 5 6\n"
-        desc += "       -------------\n"
+        desc += "┌───┬───┬───┬───┬───┬───┬───┐\n"
+        desc += "│ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │ 6 │\n"
+        desc += "├───┼───┼───┼───┼───┼───┼───┤\n"
 
         for row in range(6):
-            desc += f"Row {row}: "
+            desc += "│"
             for col in range(7):
                 if board[row, col] == 0:
-                    desc += ". "
+                    desc += " . │"
                 elif board[row, col] == 1:
-                    desc += "X "  # Player's pieces
+                    desc += " X │"  # Player's pieces
                 else:
-                    desc += "O "  # Opponent's pieces
+                    desc += " O │"  # Opponent's pieces
             desc += "\n"
+            if row < 5:  # Don't add separator after last row
+                desc += "├───┼───┼───┼───┼───┼───┼───┤\n"
 
+        desc += "└───┴───┴───┴───┴───┴───┴───┘\n"
         desc += "\nYour pieces: X\nOpponent pieces: O\nEmpty spaces: .\n"
         desc += "\nWhat column do you want to play? (0-6)"
 
