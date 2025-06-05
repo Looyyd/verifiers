@@ -29,8 +29,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file c
 """
 
 # model_name = "Qwen/Qwen2.5-7B-Instruct"
-# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+#model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
 # Configuration options
 IS_SLIPPERY = False  # Set to True for more challenging environment
@@ -100,7 +100,7 @@ trainer = GRPOFrozenLakeTrainer(
     format_reward_weight=FORMAT_REWARD_WEIGHT,
     game_reward_weight=GAME_REWARD_WEIGHT,
     max_episode_steps=MAX_EPISODE_STEPS,
-    compression_threshold=0.05,  # TODO: minimal for debugging
+    compression_threshold=0.75,
     # Trying to save vram with 8bit optimizer, TODO: remove if unstable training
     optimizers=(
         bnb.optim.Adam8bit,
