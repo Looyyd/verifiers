@@ -280,6 +280,7 @@ In that case you should use the <think> tags to organize your thoughts, then put
         """Reward function for correct action formatting."""
         rewards = []
 
+        # TODO: should make <think> mandatory!
         for completion_list in completions:
             # Check if any completion contains valid format
             has_valid_format = False
@@ -314,6 +315,7 @@ In that case you should use the <think> tags to organize your thoughts, then put
                 rewards.append(0.0)
             else:  # invalid_action, compression_too_long, error
                 # TODO: this is kinda duplicate because we also have a format reward function
+                # TODO: CAN REWARD hack, because will do an invalide action when about to lose!
                 rewards.append(-0.5)
 
         return rewards
