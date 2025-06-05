@@ -1,5 +1,6 @@
 from typing import Callable, Union
-from transformers import PreTrainedModel 
+from transformers import PreTrainedModel
+
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
 from .envs.environment import Environment
@@ -10,12 +11,17 @@ from .envs.simple_env import SimpleEnv
 from .envs.tool_env import ToolEnv
 from .envs.frozenlake_env import FrozenLakeEnv
 from .trainers.grpo_env_trainer import GRPOEnvTrainer
-from .utils.data_utils import extract_boxed_answer, extract_hash_answer, preprocess_dataset
+from .utils.data_utils import (
+    extract_boxed_answer,
+    extract_hash_answer,
+    preprocess_dataset,
+)
 from .utils.model_utils import get_model, get_tokenizer, get_model_and_tokenizer
 from .utils.config_utils import get_default_grpo_config
 from .utils.logging_utils import setup_logging, print_prompt_completions_sample
 from .trainers.grpo_env_standalone_trainer import GRPODoubleCheckTrainer
-
+from .gym_envs.connectfour import ConnectFourEnv
+from .gym_envs.connectfour.players import ChildPlayer, Player
 
 
 __version__ = "0.1.0"
@@ -42,4 +48,7 @@ __all__ = [
     "preprocess_dataset",
     "setup_logging",
     "print_prompt_completions_sample",
+    "ConnectFourEnv",
+    "ChildPlayer",
+    "Player",
 ]
