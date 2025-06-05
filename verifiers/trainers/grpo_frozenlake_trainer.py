@@ -43,7 +43,7 @@ import gymnasium as gym
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
 import numpy as np
 
-DEBUG = True
+DEBUG = False
 
 # Grid distribution configuration
 DEFAULT_GRID_DISTRIBUTION = {
