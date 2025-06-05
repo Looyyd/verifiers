@@ -77,12 +77,6 @@ class GRPOConnectFourTrainer(GRPOTrainer):
         max_episode_steps: int = 42,  # Maximum possible moves in Connect Four
         # Context compression parameters
         compression_threshold: float = 0.75,
-        compression_prompt_template: str = (
-            "This conversation is getting long. Sum up this conversation so far and the summary "
-            "will be given to your next instance to continue the task. You MUST use <think> tags "
-            "to organize your thoughts. The content after </think> will be given to your next instance. "
-            "If no <think> tags are used, no summary will be given."
-        ),
         **kwargs,
     ):
         if not args.use_vllm:  # type: ignore
@@ -98,16 +92,11 @@ class GRPOConnectFourTrainer(GRPOTrainer):
 
         # Context compression configuration
         self.compression_threshold = compression_threshold
-        self.compression_prompt_template = compression_prompt_template
 
         # Validate compression parameters
         if not (0.0 < self.compression_threshold <= 1.0):
             raise ValueError(
                 f"compression_threshold must be between 0 and 1, got {self.compression_threshold}"
-            )
-        if not self.compression_prompt_template:
-            raise ValueError(
-                "compression_prompt_template cannot be empty when using context compression"
             )
 
         # Define system prompt for Connect Four
@@ -121,20 +110,15 @@ The board is represented as a 6x7 grid:
 Columns are numbered 0-6 from left to right.
 
 # Action response format
-You should think about your move first using <think></think> tags, then give your final answer.
+You must think about your move first inside <think></think> tags, then give your final answer.
 Put your final answer in \\boxed{}, for example \\boxed{0} for column 0, \\boxed{3} for column 3, etc.
 
-Example format:
+Example response format:
 <think>
 I need to analyze the board. My opponent has three pieces in a row horizontally, so I should block them...
 </think>
 
 \\boxed{4}
-
-# Summarization format
-You might also be asked to summarize the conversation so far.
-In that case you should use the <think> tags to organize your thoughts, then put the summary outside the <think> tags.
-
 """
 
         # Store gym environments indexed by a unique ID
@@ -516,54 +500,6 @@ In that case you should use the <think> tags to organize your thoughts, then put
             new_tokens.extend(list(llm_response.outputs[0].token_ids))
             state["completion_ids_list"][-1].extend(new_tokens)
 
-            # Handle compression response
-            if state.get("is_compressing", False):
-                summary_text = assistant_msg["content"]
-                has_think_tags = "</think>" in summary_text
-
-                if has_think_tags:
-                    summary_text = summary_text.split("</think>", 1)[1].strip()
-                else:
-                    state["compression_missing_think"] = True
-                    summary_text = ""
-
-                if not summary_text.strip():
-                    summary_text = "Previous conversation summary unavailable."
-
-                env_info = self._gym_envs[state["gym_env_id"]]
-
-                if len(summary_text) > 1000:
-                    env_info["done"] = True
-                    state["completed"] = True
-                    state["episode_outcome"] = "compression_too_long"
-                    return j, state
-
-                current_board_desc = self._board_to_description(env_info["board"])
-
-                compressed_user_msg = (
-                    f"{current_board_desc}\n\n"
-                    f"Here is a message from a previous instance about the events in this task so far:\n"
-                    f"<message>{summary_text}</message>"
-                )
-
-                new_messages = []
-                if state["messages"][0]["role"] == "system":
-                    new_messages.append(state["messages"][0])
-                new_messages.append({"role": "user", "content": compressed_user_msg})
-                state["history_for_logging"].append(
-                    {"role": "user", "content": compressed_user_msg}
-                )
-
-                state["messages"] = new_messages
-                state["is_compressing"] = False
-
-                # Create new segment
-                state["prompt_ids_list"].append([])
-                state["completion_ids_list"].append([])
-                state["completion_masks_list"].append([])
-
-                return j, state
-
             # Parse action and execute gym step
             env_id = state["gym_env_id"]
             env_info = self._gym_envs[env_id]
@@ -601,19 +537,31 @@ In that case you should use the <think> tags to organize your thoughts, then put
                             current_segment_length
                             >= self.compression_threshold * self.max_completion_length
                         ):
-                            state["messages"].append(
+                            # Compress directly by creating a new segment, no need for summarization in connect four
+                            new_messages = []
+                            if state["messages"][0]["role"] == "system":
+                                new_messages.append(state["messages"][0])
+                            board_desc = self._board_to_description(next_board)
+                            new_messages.append(
                                 {
                                     "role": "user",
-                                    "content": self.compression_prompt_template,
+                                    "content": board_desc,
                                 }
                             )
                             state["history_for_logging"].append(
                                 {
                                     "role": "user",
-                                    "content": self.compression_prompt_template,
+                                    "content": f"PROMPT COMPRESSION ON THIS STEP:\n {board_desc}",
                                 }
                             )
-                            state["is_compressing"] = True
+
+                            state["messages"] = new_messages
+
+                            # Create new segment
+                            state["prompt_ids_list"].append([])
+                            state["completion_ids_list"].append([])
+                            state["completion_masks_list"].append([])
+
                         else:
                             # Continue episode - add next board state
                             env_msg = {
