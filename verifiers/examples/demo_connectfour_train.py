@@ -76,6 +76,7 @@ trainer = GRPOConnectFourTrainer(
     game_reward_weight=GAME_REWARD_WEIGHT,
     max_episode_steps=MAX_EPISODE_STEPS,
     compression_threshold=0.75,
+    use_thinking=False,
     # Trying to save vram with 8bit optimizer, TODO: remove if unstable training
     optimizers=(
         bnb.optim.Adam8bit,

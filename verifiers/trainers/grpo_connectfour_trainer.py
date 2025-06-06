@@ -77,6 +77,7 @@ class GRPOConnectFourTrainer(GRPOTrainer):
         max_episode_steps: int = 42,  # Maximum possible moves in Connect Four
         # Context compression parameters
         compression_threshold: float = 0.75,
+        use_thinking: bool = True,
         **kwargs,
     ):
         if not args.use_vllm:  # type: ignore
@@ -89,6 +90,7 @@ class GRPOConnectFourTrainer(GRPOTrainer):
         self.format_reward_weight = format_reward_weight
         self.game_reward_weight = game_reward_weight
         self.max_episode_steps = max_episode_steps
+        self.use_thinking = use_thinking
 
         # Context compression configuration
         self.compression_threshold = compression_threshold
@@ -100,7 +102,8 @@ class GRPOConnectFourTrainer(GRPOTrainer):
             )
 
         # Define system prompt for Connect Four
-        self.system_prompt = """You are playing Connect Four. In this game, you and your opponent take turns dropping pieces into a 7-column board. The first player to get 4 pieces in a row (horizontally, vertically, or diagonally) wins.
+        if self.use_thinking:
+            self.system_prompt = """You are playing Connect Four. In this game, you and your opponent take turns dropping pieces into a 7-column board. The first player to get 4 pieces in a row (horizontally, vertically, or diagonally) wins.
 
 The board is represented as a 6x7 grid:
 - .: Empty space
@@ -118,6 +121,22 @@ Example response format:
 I need to analyze the board. My opponent has three pieces in a row horizontally, so I should block them...
 </think>
 
+\\boxed{4}
+"""
+        else:
+            self.system_prompt = """You are playing Connect Four. In this game, you and your opponent take turns dropping pieces into a 7-column board. The first player to get 4 pieces in a row (horizontally, vertically, or diagonally) wins.
+
+The board is represented as a 6x7 grid:
+- .: Empty space
+- X: Your pieces
+- O: Opponent's pieces
+
+Columns are numbered 0-6 from left to right.
+
+# Action response format
+Put your move in \\boxed{}, for example \\boxed{0} for column 0, \\boxed{3} for column 3, etc.
+
+Example response format:
 \\boxed{4}
 """
 
@@ -243,32 +262,44 @@ I need to analyze the board. My opponent has three pieces in a row horizontally,
         if len(message) == 0:
             return None
 
-        # Check for properly formatted <think></think> tags
-        think_pattern = r"<think>(.*?)</think>"
-        think_matches = re.search(think_pattern, message, re.DOTALL)
+        if self.use_thinking:
+            # Check for properly formatted <think></think> tags
+            think_pattern = r"<think>(.*?)</think>"
+            think_matches = re.search(think_pattern, message, re.DOTALL)
 
-        if not think_matches:
-            # No think tags found
+            if not think_matches:
+                # No think tags found
+                return None
+
+            # Get the position where </think> ends
+            think_end_pos = think_matches.end()
+
+            # Look for \boxed{X} pattern where X is a digit 0-6
+            # Only consider matches that appear after the </think> tag
+            boxed_pattern = r"\\boxed\{(\d)\}"
+
+            # Search only in the part of the message after </think>
+            post_think_message = message[think_end_pos:]
+            matches = re.findall(boxed_pattern, post_think_message)
+
+            if matches:
+                # Take the last match in case there are multiple
+                digit = matches[-1]
+                if digit in "0123456":
+                    return int(digit)
+
             return None
+        else:
+            # only the \\boxed answer expected
+            boxed_pattern = r"\\boxed\{(\d)\}"
+            matches = re.findall(boxed_pattern, message)
+            if matches:
+                # Take the last match in case there are multiple
+                digit = matches[-1]
+                if digit in "0123456":
+                    return int(digit)
 
-        # Get the position where </think> ends
-        think_end_pos = think_matches.end()
-
-        # Look for \boxed{X} pattern where X is a digit 0-6
-        # Only consider matches that appear after the </think> tag
-        boxed_pattern = r"\\boxed\{(\d)\}"
-
-        # Search only in the part of the message after </think>
-        post_think_message = message[think_end_pos:]
-        matches = re.findall(boxed_pattern, post_think_message)
-
-        if matches:
-            # Take the last match in case there are multiple
-            digit = matches[-1]
-            if digit in "0123456":
-                return int(digit)
-
-        return None
+            return None
 
     def _format_reward_func(
         self,
