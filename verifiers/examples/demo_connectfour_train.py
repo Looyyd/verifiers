@@ -7,12 +7,12 @@ import bitsandbytes as bnb
 from verifiers.trainers.grpo_connectfour_trainer import GRPOConnectFourTrainer
 
 
-# model_name = "Qwen/Qwen2.5-7B-Instruct"
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+model_name = "Qwen/Qwen2.5-7B-Instruct"
+# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
 # Configuration options
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 NUM_GENERATIONS = BATCH_SIZE
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
