@@ -1256,6 +1256,14 @@ Example response format:
             # Update reference model to current model
             if self.ref_model is not None:
                 self.ref_model.load_state_dict(self.model.state_dict())
+                # Save current model state
+                state_dict = self.accelerator.unwrap_model(self.model).state_dict()
+
+                # Load into reference model
+                self.accelerator.unwrap_model(self.ref_model).load_state_dict(
+                    state_dict
+                )
+                del state_dict
 
         # For context compression, we need to handle the generation differently
         # because the outputs are lists of segments, not tensors that can be split
