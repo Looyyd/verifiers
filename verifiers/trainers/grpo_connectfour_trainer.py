@@ -1251,12 +1251,11 @@ Example response format:
         """Override to handle list-based inputs when using context compression."""
 
         # Override the ref_model with model every N steps
-        if self.state.global_step % 5 == 0:
+        if (self.state.global_step + 1) % 5 == 0:
             print("UPDATING REFERENCE MODEL")
             # Update reference model to current model
             if self.ref_model is not None:
                 self.ref_model.load_state_dict(self.model.state_dict())
-
 
         # For context compression, we need to handle the generation differently
         # because the outputs are lists of segments, not tensors that can be split
