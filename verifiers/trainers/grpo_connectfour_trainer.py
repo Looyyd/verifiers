@@ -1252,18 +1252,14 @@ Example response format:
 
         # Override the ref_model with model every N steps
         if (self.state.global_step + 1) % 5 == 0:
-            print("UPDATING REFERENCE MODEL")
-            # Update reference model to current model
-            if self.ref_model is not None:
-                self.ref_model.load_state_dict(self.model.state_dict())
-                # Save current model state
-                state_dict = self.accelerator.unwrap_model(self.model).state_dict()
-
-                # Load into reference model
-                self.accelerator.unwrap_model(self.ref_model).load_state_dict(
-                    state_dict
-                )
-                del state_dict
+                print("UPDATING REFERENCE MODEL")
+    
+                # Get the unwrapped models
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                unwrapped_ref_model = self.accelerator.unwrap_model(self.ref_model)
+                
+                # Copy the state dict
+                unwrapped_ref_model.load_state_dict(unwrapped_model.state_dict())
 
         # For context compression, we need to handle the generation differently
         # because the outputs are lists of segments, not tensors that can be split
