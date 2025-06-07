@@ -44,8 +44,8 @@ training_args = GRPOConfig(
     # some people online used smaller kl also https://x.com/abacaj/status/1886497011618197748
     # TODO: trying beta 0 to see if it can learn at all even with catastrophic forgetting.
     # Also base model is just really bad at connect four so kl seems meh
-    beta=0,
-    # beta=0.001,
+    # beta=0,
+    beta=0.001,
     max_prompt_length=512,
     max_completion_length=2048,
     per_device_train_batch_size=BATCH_SIZE,
