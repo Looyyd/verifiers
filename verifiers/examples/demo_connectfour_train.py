@@ -12,7 +12,7 @@ model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
 # Configuration options
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 NUM_GENERATIONS = BATCH_SIZE
 N_INITIAL_SAMPLES = 1000  # Number of initial states in dataset
 FORMAT_REWARD_WEIGHT = 1.0  # Weight for format correctness
