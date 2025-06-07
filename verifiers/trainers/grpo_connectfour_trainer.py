@@ -1250,6 +1250,13 @@ Example response format:
     ) -> dict[str, Union[torch.Tensor, Any]]:
         """Override to handle list-based inputs when using context compression."""
 
+        # Override the ref_model with model every N steps
+        if self.state.global_step % 5 == 0:
+            # Update reference model to current model
+            if self.ref_model is not None:
+                self.ref_model.load_state_dict(self.model.state_dict())
+
+
         # For context compression, we need to handle the generation differently
         # because the outputs are lists of segments, not tensors that can be split
         mode = "train" if self.model.training else "eval"
