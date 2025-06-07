@@ -1252,6 +1252,7 @@ Example response format:
 
         # Override the ref_model with model every N steps
         if self.state.global_step % 5 == 0:
+            print("UPDATING REFERENCE MODEL")
             # Update reference model to current model
             if self.ref_model is not None:
                 self.ref_model.load_state_dict(self.model.state_dict())
