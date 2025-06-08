@@ -143,7 +143,6 @@ def main():
         logging_steps=10,
         save_steps=100,
         save_total_limit=2,
-        evaluation_strategy="no",
         fp16=False,
         bf16=True,
         push_to_hub=args.push_to_hub,
