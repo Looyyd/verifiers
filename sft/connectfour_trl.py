@@ -62,12 +62,6 @@ def main():
         help="Batch size per GPU/CPU for training",
     )
     parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=4,
-        help="Number of updates steps to accumulate before performing a backward/update pass",
-    )
-    parser.add_argument(
         "--learning_rate",
         type=float,
         default=1e-6,
@@ -162,7 +156,6 @@ def main():
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=True,
         learning_rate=args.learning_rate,
         logging_steps=10,
