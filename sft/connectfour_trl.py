@@ -159,7 +159,9 @@ def main():
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # must be false for DDP
+        ddp_find_unused_parameters=False,  # if use DDP is false, otherwise true
         learning_rate=args.learning_rate,
         logging_steps=10,
         save_strategy="epoch",
