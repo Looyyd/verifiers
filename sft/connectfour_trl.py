@@ -138,8 +138,6 @@ def main():
         args.model_name_or_path, **model_kwargs
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-
     # Setup chat format if needed
     if tokenizer.chat_template is None:
         model, tokenizer = setup_chat_format(model, tokenizer)
@@ -190,7 +188,6 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
         peft_config=peft_config,
         max_seq_length=1024,
         dataset_text_field="messages",  # Use the messages field from dataset
