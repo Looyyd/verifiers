@@ -1,9 +1,4 @@
-
 #!/bin/bash
-
-# Install required packages (run this once)
-echo "Installing required packages..."
-pip install -U transformers datasets accelerate peft trl bitsandbytes tensorboard
 
 # Login to HuggingFace (required for pushing model)
 # Uncomment and run this if you haven't logged in yet
