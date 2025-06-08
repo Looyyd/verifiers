@@ -173,7 +173,7 @@ def main():
         learning_rate=args.learning_rate,
         logging_steps=10,
         save_strategy="epoch",
-        evaluation_strategy="epoch" if eval_dataset else "no",
+        eval_strategy="epoch" if eval_dataset else "no",
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id,
         warmup_ratio=0.1,
@@ -181,7 +181,7 @@ def main():
         optim="adamw_torch",
         bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
         fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
-        report_to=["tensorboard"],
+        report_to=["wandb"],
     )
 
     # Initialize trainer
