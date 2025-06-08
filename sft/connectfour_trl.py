@@ -112,11 +112,9 @@ def main():
     if eval_dataset:
         print(f"Validation examples: {len(eval_dataset)}")
 
-    local_rank = os.getenv("LOCAL_RANK")
-    device_string = "cuda:" + str(local_rank)
     # Model configuration
     model_kwargs = {
-        "device_map": device_string,
+        "device_map": None,
     }
 
     # 4-bit quantization config
