@@ -96,6 +96,7 @@ def main():
     # Load dataset
     print(f"Loading dataset from {args.dataset_path}")
     dataset = load_from_disk(args.dataset_path)
+    dataset = dataset[:100] # smaller dataset for debug
 
     # Split dataset if needed (use 90% for training, 10% for validation)
     if "train" not in dataset.column_names:
