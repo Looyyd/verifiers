@@ -128,18 +128,26 @@ def board_to_string(board: np.ndarray) -> str:
     return desc
 
 
-def generate_random_board_state(env: ConnectFourEnv, num_moves: int) -> np.ndarray:
-    """Generate a random board state by playing random moves."""
-    env.reset()
+def generate_random_board_state(
+    env: ConnectFourEnv, num_moves: int, force_reset: bool = False
+) -> np.ndarray:
+    """Generate a random board state by playing random moves.
+
+    Args:
+        env: The Connect Four environment
+        num_moves: Number of random moves to make
+        force_reset: If True, always reset the environment first
+    """
+    # Only reset if forced or if the game is done/no valid moves
+    if force_reset or env.done or not env.get_valid_actions():
+        env.reset()
 
     for _ in range(num_moves):
         valid_actions = env.get_valid_actions()
         if not valid_actions or env.done:
             break
-
         action = random.choice(valid_actions)
         env.step(action)
-
     return env.board.copy()
 
 
@@ -212,11 +220,9 @@ def create_example(env: ConnectFourEnv) -> Dict[str, str]:
     return {
         "prompt": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ],
-        "completion": [
-            {"role": "assistant", "content": assistant_message}
-        ]
+        "completion": [{"role": "assistant", "content": assistant_message}],
     }
 
 
@@ -266,12 +272,12 @@ def create_dataset(
     print("Sample example from the dataset:")
     print("=" * 80)
     sample = dataset_examples[0]
-    
+
     print("\n[PROMPT]")
     for message in sample["prompt"]:
         print(f"\n[{message['role'].upper()}]")
         print(message["content"])
-    
+
     print("\n[COMPLETION]")
     for message in sample["completion"]:
         print(f"\n[{message['role'].upper()}]")
