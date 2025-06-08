@@ -18,7 +18,7 @@ from transformers import (
     TrainingArguments,
     BitsAndBytesConfig,
 )
-from trl import SFTTrainer, setup_chat_format
+from trl import SFTConfig, SFTTrainer
 from peft import LoraConfig, TaskType
 import torch
 
@@ -157,8 +157,8 @@ def main():
             ],
         )
 
-    # Training arguments
-    training_args = TrainingArguments(
+    config = SFTConfig(
+        completion_only_loss=True,
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -170,24 +170,16 @@ def main():
         eval_strategy="epoch" if eval_dataset else "no",
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id,
-        warmup_ratio=0.1,
-        lr_scheduler_type="cosine",
-        optim="adamw_torch",
-        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-        fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
         report_to=["wandb"],
     )
 
     # Initialize trainer
     trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        args=config,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         peft_config=peft_config,
-        max_seq_length=1024,
-        dataset_text_field="messages",  # Use the messages field from dataset
-        packing=False,  # Disable packing for simplicity
     )
 
     # Train
@@ -203,8 +195,8 @@ def main():
         print(f"Pushing model to HuggingFace Hub: {args.hub_model_id}")
         trainer.push_to_hub()
 
-
     print("Training complete!")
+
 
 if __name__ == "__main__":
     main()
