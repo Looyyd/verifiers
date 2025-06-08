@@ -72,11 +72,6 @@ def main():
         action="store_true",
         help="Whether to use LoRA for efficient fine-tuning",
     )
-    parser.add_argument(
-        "--use_4bit",
-        action="store_true",
-        help="Whether to use 4-bit quantization",
-    )
 
     # HuggingFace Hub arguments
     parser.add_argument(
@@ -112,26 +107,9 @@ def main():
     if eval_dataset:
         print(f"Validation examples: {len(eval_dataset)}")
 
-    # Model configuration
-    model_kwargs = {
-        "device_map": None,
-    }
-
-    # 4-bit quantization config
-    if args.use_4bit:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
-        model_kwargs["quantization_config"] = bnb_config
-
     # Load model and tokenizer
     print(f"Loading model: {args.model_name_or_path}")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path, **model_kwargs
-    )
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
 
     # LoRA configuration
     peft_config = None
