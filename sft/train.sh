@@ -17,7 +17,7 @@ accelerate launch --num_processes 4 \
     --num_machines 1 \
     --mixed_precision bf16 \
     --dynamo_backend no \
-    train_connectfour.py \
+    ./sft/connectfour.py \
     --dataset_path connectfour_grid_dataset \
     --output_dir ./connectfour-qwen-lora \
     --hub_model_id "$HF_USERNAME/connectfour-qwen2.5-1.5b-full" \
