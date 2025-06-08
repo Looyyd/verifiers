@@ -138,10 +138,6 @@ def main():
         args.model_name_or_path, **model_kwargs
     )
 
-    # Setup chat format if needed
-    if tokenizer.chat_template is None:
-        model, tokenizer = setup_chat_format(model, tokenizer)
-
     # LoRA configuration
     peft_config = None
     if args.use_lora:
@@ -207,57 +203,8 @@ def main():
         print(f"Pushing model to HuggingFace Hub: {args.hub_model_id}")
         trainer.push_to_hub()
 
-        # Also push the tokenizer
-        tokenizer.push_to_hub(args.hub_model_id)
 
     print("Training complete!")
-
-    # Print a sample prediction
-    print("\n" + "=" * 80)
-    print("Testing the fine-tuned model with a sample:")
-    print("=" * 80)
-
-    # Get a sample from the dataset
-    sample = train_dataset[0]["messages"]
-
-    # Format the conversation up to the user message
-    messages = sample[:2]  # System and user messages
-
-    # Generate response
-    model.eval()
-    inputs = tokenizer.apply_chat_template(
-        messages, return_tensors="pt", add_generation_prompt=True
-    )
-
-    if torch.cuda.is_available():
-        inputs = inputs.to("cuda")
-
-    with torch.no_grad():
-        outputs = model.generate(
-            inputs,
-            max_new_tokens=512,
-            temperature=0.1,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    response = tokenizer.decode(outputs[0][inputs.shape[1] :], skip_special_tokens=True)
-
-    print("User message:")
-    print(
-        sample[1]["content"][:200] + "..."
-        if len(sample[1]["content"]) > 200
-        else sample[1]["content"]
-    )
-    print("\nModel response:")
-    print(response[:500] + "..." if len(response) > 500 else response)
-    print("\nExpected response:")
-    print(
-        sample[2]["content"][:500] + "..."
-        if len(sample[2]["content"]) > 500
-        else sample[2]["content"]
-    )
-
 
 if __name__ == "__main__":
     main()
