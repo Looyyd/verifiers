@@ -210,10 +210,12 @@ def create_example(env: ConnectFourEnv) -> Dict[str, str]:
     )
 
     return {
-        "messages": [
+        "prompt": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_message},
+            {"role": "user", "content": user_message}
+        ],
+        "completion": [
+            {"role": "assistant", "content": assistant_message}
         ]
     }
 
@@ -264,7 +266,14 @@ def create_dataset(
     print("Sample example from the dataset:")
     print("=" * 80)
     sample = dataset_examples[0]
-    for message in sample["messages"]:
+    
+    print("\n[PROMPT]")
+    for message in sample["prompt"]:
+        print(f"\n[{message['role'].upper()}]")
+        print(message["content"])
+    
+    print("\n[COMPLETION]")
+    for message in sample["completion"]:
         print(f"\n[{message['role'].upper()}]")
         print(message["content"])
 
@@ -282,8 +291,8 @@ if __name__ == "__main__":
     # Analyze action distribution
     action_counts = {1: 0, 2: 0, 3: 0}
     for example in dataset:
-        messages = example["messages"]
-        user_msg = messages[1]["content"]
+        prompt = example["prompt"]
+        user_msg = prompt[1]["content"]  # user message is second in prompt
         num_actions = user_msg.count("Player")
         if num_actions in action_counts:
             action_counts[num_actions] += 1
