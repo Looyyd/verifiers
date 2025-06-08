@@ -4,10 +4,9 @@ from datasets import load_from_disk
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
     BitsAndBytesConfig,
 )
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import argparse
 
@@ -129,8 +128,8 @@ def main():
             trust_remote_code=True,
         )
 
-    # Training arguments
-    training_args = TrainingArguments(
+    # SFT configuration using SFTConfig instead of TrainingArguments
+    training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -151,6 +150,12 @@ def main():
         ddp_find_unused_parameters=False,
         group_by_length=True,
         dataloader_num_workers=4,
+        # SFT-specific parameters
+        max_length=2048,
+        dataset_text_field="text",
+        packing=False,
+        # For Qwen models with predefined chat template
+        eos_token="<|im_end|>",
     )
 
     # Initialize trainer
@@ -158,10 +163,8 @@ def main():
         model=model,
         args=training_args,
         train_dataset=dataset,
-        max_seq_length=2048,
-        dataset_text_field="text",  # This will be created by formatting function
+        processing_class=tokenizer,
         formatting_func=format_chat_template,
-        packing=False,
     )
 
     # Start training
