@@ -112,10 +112,11 @@ def main():
     if eval_dataset:
         print(f"Validation examples: {len(eval_dataset)}")
 
+    local_rank = os.getenv("LOCAL_RANK")
+    device_string = "cuda:" + str(local_rank)
     # Model configuration
     model_kwargs = {
-        "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
-        "device_map": "auto" if torch.cuda.is_available() else None,
+        "device_map": device_string,
     }
 
     # 4-bit quantization config

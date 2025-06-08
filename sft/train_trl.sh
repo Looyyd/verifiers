@@ -14,7 +14,7 @@ fi
 
 # Option 1: Full fine-tuning (requires more GPU memory)
 echo "Starting full fine-tuning..."
-python ./sft/connectfour_trl.py \
+accelerate launch ./sft/connectfour_trl.py \
     --model_name_or_path "Qwen/Qwen2.5-1.5B-Instruct" \
     --dataset_path "./connectfour_grid_dataset" \
     --output_dir "./connectfour-finetuned" \
