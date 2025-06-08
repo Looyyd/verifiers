@@ -4,7 +4,7 @@
 # Make sure to update HF_USERNAME with your HuggingFace username
 
 HF_USERNAME="Looyyd"  # Change this to your HuggingFace username
-MODEL_NAME="connectfour-qwen2-1.5b"
+MODEL_NAME="connectfour-qwen2.5-1.5b-instruct"
 
 # Create dataset if it doesn't exist
 if [ ! -d "./connectfour_grid_dataset" ]; then
