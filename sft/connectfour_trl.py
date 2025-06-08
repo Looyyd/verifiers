@@ -70,7 +70,7 @@ def main():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=2e-4,
+        default=1e-6,
         help="The initial learning rate for AdamW optimizer",
     )
     parser.add_argument(
