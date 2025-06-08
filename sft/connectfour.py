@@ -158,7 +158,6 @@ def main():
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
         max_seq_length=2048,
         dataset_text_field="text",  # This will be created by formatting function
         formatting_func=format_chat_template,
