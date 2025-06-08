@@ -8,12 +8,8 @@ from transformers import (
 )
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from accelerate import PartialState
 import argparse
-
-
-def format_chat_template(example):
-    """Format the messages into the chat template."""
-    return {"text": example["messages"]}
 
 
 def main():
@@ -76,6 +72,12 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
+    # Define formatting function after tokenizer is loaded
+    def format_chat_template(example):
+        """Format the messages into the chat template."""
+        # Apply the chat template to the messages
+        return tokenizer.apply_chat_template(example["messages"], tokenize=False)
+
     # Model loading configuration
     if args.use_lora:
         # Use 4-bit quantization with LoRA for memory efficiency
@@ -121,10 +123,12 @@ def main():
     else:
         # Full fine-tuning
         print(f"Loading model for full fine-tuning...")
+        # For distributed training with DDP, follow the documentation guidance
+        device_string = PartialState().process_index
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map={"": device_string},
             trust_remote_code=True,
         )
 
@@ -135,6 +139,7 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # Required for DDP
         optim="adamw_torch",
         learning_rate=2e-4 if args.use_lora else 5e-5,
         lr_scheduler_type="cosine",
