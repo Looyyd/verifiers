@@ -21,6 +21,6 @@ python ./sft/connectfour_trl.py \
     --num_train_epochs 3 \
     --per_device_train_batch_size 4 \
     --learning_rate 2e-5 \
-    --push_to_hub \
-    --hub_model_id "${HF_USERNAME}/${MODEL_NAME}"
+    # --push_to_hub \
+    # --hub_model_id "${HF_USERNAME}/${MODEL_NAME}"
 
