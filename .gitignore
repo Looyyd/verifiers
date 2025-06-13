@@ -7,6 +7,7 @@ env/
 uv.lock
 CLAUDE.md
 .cursorrules
+.claude/
 
 # artifacts
 dist/
@@ -21,6 +22,7 @@ build/
 wandb/
 outputs/
 logs/
+connectfour_grid_dataset/
 
 # development
 .idea/

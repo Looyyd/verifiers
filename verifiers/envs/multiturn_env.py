@@ -94,6 +94,20 @@ class MultiTurnEnv(Environment):
             return self.eval_dataset.shuffle(seed=seed).select(range(n)) # type: ignore
         return self.eval_dataset
 
+    def initialize_custom_state(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Override this method in subclasses to add custom state fields.
+        Called when initializing a new state.
+        """
+        return {}
+    
+    def update_custom_state(self, state: Dict[str, Any], messages: List[Dict[str, str]]) -> None:
+        """
+        Override this method in subclasses to update custom state fields.
+        Called after each step.
+        """
+        pass
+
     @abstractmethod
     def is_completed(self, messages: List[Dict[str, str]], **kwargs: Any) -> bool:
         pass
@@ -170,6 +184,8 @@ class MultiTurnEnv(Environment):
                 state["completion_mask"] = state["completion_mask"][:len(state["completion_ids"])]
             else:
                 state["messages"].append(self.env_response(state["messages"]))
+                # Update custom state after environment response
+                self.update_custom_state(state, state["messages"])
 
             # enforce that the completion mask and completion ids are the same length
             # weird bug that happens rarely and only for certain models; something tokenizer related :(
@@ -204,14 +220,20 @@ class MultiTurnEnv(Environment):
 
         # initialize state variables
         all_completed = False
-        states = [{
-            "messages": m,
-            "prompt_messages": len(m),
-            "prompt_ids": [],
-            "completed": False,
-            "completion_ids": [],
-            "completion_mask": []
-        } for m in prompts]
+        states = []
+        for m in prompts:
+            state = {
+                "messages": m,
+                "prompt_messages": len(m),
+                "prompt_ids": [],
+                "completed": False,
+                "completion_ids": [],
+                "completion_mask": []
+            }
+            # Add custom state fields from subclass
+            custom_state = self.initialize_custom_state(m)
+            state.update(custom_state)
+            states.append(state)
 
         # main loop
         while not all_completed:

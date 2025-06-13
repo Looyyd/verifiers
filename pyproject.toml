@@ -12,6 +12,7 @@ dependencies = [
     "setuptools",
     "deepspeed",
     "accelerate",
+    "bitsandbytes",
     "peft",
     "wandb",
     "rich",
@@ -25,6 +26,7 @@ dependencies = [
     "requests>=2.32.3",
     "smolagents>=1.15.0",
     "vllm>=0.8.5.post1",
+    "gymnasium>=0.29.0",
 ]
 
 [tool.setuptools]

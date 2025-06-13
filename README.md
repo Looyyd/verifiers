@@ -1,75 +1,48 @@
-# Verifiers: Reinforcement Learning with LLMs in Verifiable Environments
+The plan for this fork was to build up to this in a few steps:
 
-This repository contains a set of tools for reinforcement learning with LLMs in verifiable environments.
+- Play a simple game, like Frozenlake
+- Play a simple PvP game, Connect 4 was chosen. First play the game vs an AI algorithm, then learn it with self-play.
+- Repeat the same steps as with Connect 4, but on Pokemon Showdown random battles.
 
-**WARNING:** This repository in its current state should be viewed as **in-progress research code**, and is not guaranteed to yield stable or optimal training results. Best results will likely be found on reasonable timescales when using 7B+ models, and at least 8 GPUs.
+This was a bit ambitious, and a bit early for the current state of LLM RL.
 
-**Note:** If you don't need multi-turn tool calling or agentic interactions, you should probably just use TRL (or Unsloth/Axolotl) for GRPO. This is mostly a multi-turn LLM RL repo with some other bells and whistles.
+Here is a brief description of the experiments done.
 
+## Frozenlake
 
-## Setup
+The Frozenlake environment can be pretty successfully learned by an LLM.
+However, in this simple example we already notice some limitations:
 
-PyPI [coming soon](https://pypi.org/project/verifiers/), for now just do:
-```bash
-git clone https://github.com/willccbb/verifiers.git
-cd verifiers
-uv sync
-uv pip install flash-attn --no-build-isolation
-source .venv/bin/activate
-```
-Ensure your `wandb` and `huggingface-cli` logins are set up (or set `report_to=None` in `training_args`).
+- The base models are terrible at understanding grids; they pretty much start with random moves.
+- Some games can have long context. For this, context compression logic was implemented. This changes the conversation history into an array of conversations, with the conversation being reset when the token limit is about to be reached.
+- Learning this simple task was very slow and didn't even reach good performance. The average game reward reached 56% using QWEN 1.5B as the base model, meaning the model only finishes the track 56% of the time.
 
-If you encounter version issues, please confirm that you are able to run basic TRL training in your environment before opening an issue (see `verifiers/examples/trl_grpo.py` as a reference).
+![frozenlake_rewards](./images/frozenlake_game_rewards_1.5B_qwen.png)
 
-## Usage (Multi-GPU)
+While perhaps better results could have been obtained with a 7B model or larger, I am unsure since even the base 7B model is very bad at the task by default.
 
-### Training with Multi-Turn GRPO
+Furthermore, reasoning traces seem totally useless on tasks where the model doesn't have a baseline performance, because the traces don't make any sense and are not related to the answers.
 
-See `verifiers/examples/math_train.py` for an example with the ToolEnv environment + a Python tool.
+## Connect Four
 
-To run on a 8-GPU node with 4 inference GPUs and 4 training GPUs:
-```bash
-# Launch vLLM inference server from verifiers/, with .venv active
-CUDA_VISIBLE_DEVICES=0,1,2,3 python verifiers/inference/vllm_serve.py --model "Qwen/Qwen2.5-7B-Instruct" --tensor_parallel_size 4 --max_model_len 8192  --gpu_memory_utilization 0.9 --enable_prefix_caching True
-```
+To easily implement this, code from this repo was used:
+https://github.com/lucasBertola/Connect-4-Gym-env-Reinforcement-learning
 
-```bash
-# Run training script from verifiers/, with .venv active
-CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num-processes 4 --config-file configs/zero3.yaml verifiers/examples/math_train.py
-```
+But even against a "BabyPlayer" (that plays randomly unless it sees a move that can align 4), the Qwen 1.5B model couldn't learn to beat it consistently, showing no progress at all, even after receiving some positive rewards.
 
-Multi-node training setups are supported as well; you can specify the host IP + port of your inference as an argument in the `GRPOConfig` in your training script. See the TRL [docs](https://huggingface.co/docs/trl/main/en/grpo_trainer#trl.GRPOTrainer) for info on multi-node training via SLURM.
+![connect_four](./images/connectfour_game_rewards_1.5B_qwen.png)
 
-### Evaluation
+This probably highlights that current LLM RL algorithms are not efficient at sparse multi-turn tasks. Actually, as far as I know, as of July 2025, there is not a single example of an open-source LLM trained on sparse multi-turn envs.
 
-You can also use environment classes to evaluate models with multi-turn tool use offline, i.e. without RL training. See `verifiers/examples/math_eval.py` for an example.
+For this reason, I have decided to not continue experiments with self-play, etc. I will try again if open-source research starts showing promising results on these.
 
-### Custom Environments
+Instead, a similar problem that I think could be solvable by today's algorithms is making an LLM reason on chess, because it can be treated as a single-turn env, where the reward is the change in Stockfish evaluation.
 
-To create your own multi-turn environment, inherit from `MultiTurnEnv` and implement:
-```python
-def is_completed(self, messages: List[Dict[str, str]], **kwargs: Any) -> bool:
-    pass
+## Takeaways
 
-def env_response(self, messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, str]:
-    pass
-```
+- GRPO on multi-turn tasks is not proven to work
+- Probably need to SFT the model to at least show some capabilities on the base task before using RL, especially if you want to add reasoning to the output format.
 
-## Features
-- [X] Environments (`MultiTurnEnv`): `DoubleCheckEnv`, `CodeEnv`, `ToolEnv`, `SmolaToolEnv`
-- [X] Multi-turn tool use in `ToolEnv`, `SmolaToolEnv`, `CodeEnv`
-- [X] Dataset formatting + XML parsers
-- [X] Basic rubrics for math/code correctness + formatting
-- [X] Defaults for GRPO, model, tokenizer, etc.
+## Implemented Features
 
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@article{brown2025verifiers,
-  title={Verifiers: Reinforcement Learning with LLMs in Verifiable Environments},
-  author={Brown, William},
-  year={2025}
-}
-```
+- Context compression: This stores an array of conversations instead of a single conversation per rollout. This allows resetting the conversation by adding a new entry to the conversation array. In theory, for Pokemon Showdown, a model could learn to write a message that summarizes the history so far, being able to keep the information about current strategy and player patterns and pass it to the next conversation.

@@ -24,18 +24,14 @@ You are a helpful assistant. In each turn, think step-by-step inside <think>...<
 
 dataset = preprocess_dataset("math", "train", n=1000)
 
-#vf_env = vf.SingleTurnEnv(
-vf_env = vf.DoubleCheckEnv(
-    dataset=dataset,
-    system_prompt=SIMPLE_PROMPT,
-    few_shot=[]
-)
+# vf_env = vf.SingleTurnEnv(
+vf_env = vf.DoubleCheckEnv(dataset=dataset, system_prompt=SIMPLE_PROMPT, few_shot=[])
 print(vf_env.system_prompt)
 
 model, tokenizer = vf.get_model_and_tokenizer(model_name)
 run_name = "demo-grpo_" + model_name.split("/")[-1].lower()
 
-training_args=GRPOConfig(
+training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
     learning_rate=1e-6,
@@ -49,7 +45,7 @@ training_args=GRPOConfig(
     beta=0,
     max_prompt_length=512,
     max_completion_length=1536,
-    per_device_train_batch_size=16,
+    per_device_train_batch_size=4,
     num_generations=4,
     gradient_accumulation_steps=1,
     gradient_checkpointing=True,
@@ -61,15 +57,18 @@ training_args=GRPOConfig(
     log_on_each_node=False,
     log_completions=True,
     report_to="wandb",
-    reward_weights=vf_env.get_reward_weights()
+    reward_weights=vf_env.get_reward_weights(),
 )
 
-trainer = vf.GRPOEnvTrainer(
+# Use the standalone trainer instead of GRPOEnvTrainer
+trainer = vf.GRPODoubleCheckTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=vf_env.get_reward_funcs(),
-    env=vf_env,
     args=training_args,
-    train_dataset=vf_env.get_dataset()
+    train_dataset=vf_env.get_dataset(),
+    # Multi-turn specific parameters
+    system_prompt=SIMPLE_PROMPT,
+    few_shot=[],
 )
 trainer.train()

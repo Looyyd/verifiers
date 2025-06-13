@@ -11,17 +11,20 @@ CUDA_VISIBLE_DEVICES=1 accelerate launch --num-processes 1 --config-file configs
 
 dataset: Dataset = load_dataset("trl-lib/tldr", split="train")
 
+
 # Define the reward function, which rewards completions that are close to 20 characters
 def reward_len(completions: list[str], **kwargs):
     return [-abs(20 - len(completion)) for completion in completions]
 
 
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-training_args = GRPOConfig(output_dir="Qwen2.5-1.5B-GRPO", logging_steps=10, use_vllm=True)
+training_args = GRPOConfig(
+    output_dir="Qwen2.5-1.5B-GRPO", logging_steps=10, use_vllm=True
+)
 
 run_name = "demo-grpo_" + model_name.split("/")[-1].lower()
 
-training_args=GRPOConfig(
+training_args = GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
     learning_rate=1e-6,
@@ -45,8 +48,8 @@ training_args=GRPOConfig(
     use_liger_kernel=True,
     use_liger_loss=True,
     use_vllm=True,
-    vllm_server_host="0.0.0.0", # replace with your inference server's host for multi-node setups
-    vllm_server_port=8000, 
+    vllm_server_host="0.0.0.0",  # replace with your inference server's host for multi-node setups
+    vllm_server_port=8000,
     vllm_gpu_memory_utilization=0.9,
     logging_steps=1,
     log_on_each_node=False,
@@ -58,6 +61,6 @@ trainer = GRPOTrainer(
     model=model_name,
     reward_funcs=[reward_len],
     args=training_args,
-    train_dataset=dataset, # type: ignore
+    train_dataset=dataset,  # type: ignore
 )
 trainer.train()
